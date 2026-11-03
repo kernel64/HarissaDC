@@ -20,19 +20,19 @@ Your reports fill this list: open an issue with the game, its format and what yo
 | Street Fighter III: 3rd Strike | Playable | Console | 60 fps. |
 | Sonic Adventure | Playable | Console | 60 fps. |
 | Sonic Adventure 2 | Starts | Console | Menus at 60 fps; game not checked yet. |
-| Unreal Tournament | Starts | Console | Menus at 57 fps with music; matches checked on PC only. |
-| Resident Evil Code: Veronica | Starts | Console | Title and menus at 60 fps, videos at about 30 fps; the memory card screen works (PC). |
-| Quake III Arena | Starts | Console | Menus at 60 fps with music; intro video slow; matches not checked yet. |
-| Sega Rally 2 | Slow | Console | Windows CE game: races at about 30-45 fps. |
-| Resident Evil 3: Nemesis | Starts | Console | Intro movies at full speed, memory card screen. |
-| Grand Theft Auto 2 | Playable | Console | About 59 fps in game. |
-| Resident Evil 2 | Starts | Console | Windows CE game: intro movies and title screen. |
-| Wacky Races | Starts | Console | Intro and 3D title screen. |
-| Zombie Revenge | Starts | PC | Title screen and intro. |
-| Dirty Pigskin Football | Slow | Console | Atomiswave conversion: about 30 fps. |
-| Extreme Hunting 2 | Starts | Console | Atomiswave conversion: light gun (left stick, RT or A). |
-| Metal Slug 6 | Starts | Console | Atomiswave conversion: about 60 fps. |
-| The King of Fighters XI | Starts | Console | Atomiswave conversion: about 46 fps. |
+| Unreal Tournament | | | |
+| Resident Evil Code: Veronica | | | |
+| Quake III Arena | | | |
+| Sega Rally 2 | | | |
+| Resident Evil 3: Nemesis | | | |
+| Grand Theft Auto 2 | | | |
+| Resident Evil 2 | | | |
+| Wacky Races | | | |
+| Zombie Revenge | | | |
+| Dirty Pigskin Football | | | |
+| Extreme Hunting 2 | | | |
+| Metal Slug 6 | | | |
+| The King of Fighters XI | | | |
 
 Status: **Playable** (can be played through as far as tested), **Starts** (boots and shows
 its menus, gameplay not checked yet), **Slow** (works but below full speed), **Too slow**
