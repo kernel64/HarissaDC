@@ -11,8 +11,6 @@ yet. Your reports are what will decide what gets fixed first.
 Get the latest build from the [Releases](https://github.com/kernel64/HarissaDC/releases) page: the zip holds the
 `HarissaDC` folder to copy to the console and this documentation.
 
-Version française : [LISEZMOI.md](LISEZMOI.md).
-
 ## What you need
 
 - An Xbox 360 that runs unsigned code (RGH or JTAG) with a homebrew launcher

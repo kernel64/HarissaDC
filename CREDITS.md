@@ -1,44 +1,35 @@
-# Crédits
+# Credits
 
-Ce projet s'appuie sur l'étude des émulateurs suivants :
+HarissaDC was written for the Xbox 360 after studying these emulators (studied, not copied):
 
-- **nullDC4Wii** — BenoitAdam94 (https://github.com/BenoitAdam/nullDC4Wii), fork de nullDCe (skmp)
-  et de nullDC (drk||Raziel, ZeZu). nullDCe n'étant pas sous MIT, étudié, non copié.
-- **nulldc-360** — gligli, GPLv3 (https://github.com/gligli/nulldc-360). Étudié, non copié.
-- **Flycast** — flyinghead et contributeurs, GPLv2 (https://github.com/flyinghead/flycast).
-  Étudié, non copié.
+- **nullDC4Wii** — BenoitAdam94 (https://github.com/BenoitAdam/nullDC4Wii), a fork of nullDCe (skmp)
+  and nullDC (drk||Raziel, ZeZu).
+- **nulldc-360** — gligli, GPLv3 (https://github.com/gligli/nulldc-360).
+- **Flycast** — flyinghead and contributors, GPLv2 (https://github.com/flyinghead/flycast).
 
-Code repris :
+Code from other projects:
 
-- **Harissa64** — Mohamed Aymen (https://github.com/kernel64/Harissa64). Le propriétaire autorise
-  la reprise sous MIT des parties écrites pour Harissa64 (pas de celles dérivées de code tiers).
-- **Inter** (police de l'interface, sous forme d'atlas) — The Inter Project Authors, SIL Open Font
-  License 1.1 (`third_party/inter/OFL.txt`).
-
-- **zlib 1.3.1** (inflate, CRC-32, adler32 seulement, compilé avec `Z_SOLO`) — Jean-loup Gailly et
-  Mark Adler, licence zlib (`src/third_party/zlib/LICENSE`, non modifié), copie reprise de
-  Harissa64. Sert au décodage PNG (drapeaux de l'écran des langues).
-- **BearSSL 0.6** (TLS des téléchargements de jaquettes) — Thomas Pornin, licence MIT
-  (`src/third_party/bearssl/LICENSE.txt`, non modifié), copie reprise de Harissa64.
-- **SoundTouch 2.3.3** (étirement temporel du son sous la pleine vitesse, `xb_audio.cpp`) —
-  Olli Parviainen, LGPL-2.1 (`src/third_party/soundtouch/COPYING.TXT`), https://codeberg.org/soundtouch/soundtouch.
-  Seuls les fichiers de l'étirement sont repris ; modification locale : `override` retiré des
-  destructeurs (refusé par le compilateur VS2010 de la XDK). Même usage que Dolphin, PCSX2 et
-  DuckStation, étudiés pour ce choix.
-- **CHD** : le format « Compressed Hunks of Data » de MAME (Aaron Giles, BSD-3). Lecteur écrit
-  pour HarissaDC (`src/disc/chd.cpp`, y compris le décodeur FLAC et l'ECC CD), sans code repris ; les
-  petites images de test de Flycast (`ref/`, hors dépôt) servent seulement aux tests locaux.
-- **Jaquettes** : liste Redump des disques Dreamcast de libretro-database
-  (https://github.com/libretro/libretro-database) et images de libretro-thumbnails
-  (https://thumbnails.libretro.com), téléchargées par la console, jamais incluses dans le dépôt.
-- **Noto Sans Arabic** (glyphes arabes de l'atlas, repris de Harissa64) — The Noto Project Authors, SIL Open
-  Font License 1.1 (`third_party/noto-arabic/OFL.txt`).
-
-Code repris ou adapté de Harissa64 (même auteur, sous MIT ici) :
-
-- `src/platform/xbox360/xb_ui.cpp`, `xb_ui_atlas.h` (UTF-8, droite à gauche, logo), `xb_png.cpp`
-  (décodage PNG), `xb_flags.h` (drapeaux), `xb_lang.cpp`, `tools/gen_lang.py` (tables des textes,
-  formes arabes jointes), l'écran des langues et la passe d'affichage (`xb_display.cpp`),
-  `xb_net.cpp` (HTTPS) et `xb_art.cpp` (jaquettes, adapté aux disques Dreamcast).
-- Le filtre de netteté suit l'idée d'AMD FidelityFX CAS (MIT) et les effets CRT le shader CRT de
-  Timothy Lottes (domaine public), comme dans Harissa64.
+- **Harissa64** — Mohamed Aymen (https://github.com/kernel64/Harissa64), same author: the user
+  interface (`xb_ui.cpp`, `xb_ui_atlas.h`), PNG decoding (`xb_png.cpp`), flags (`xb_flags.h`),
+  languages (`xb_lang.cpp`, `tools/gen_lang.py`), the language screen, the display pass
+  (`xb_display.cpp`), HTTPS (`xb_net.cpp`) and box art (`xb_art.cpp`, adapted to Dreamcast discs).
+- **zlib 1.3.1** (inflate, CRC-32, adler32) — Jean-loup Gailly and Mark Adler, zlib license
+  (`src/third_party/zlib/LICENSE`, unmodified). PNG decoding.
+- **BearSSL 0.6** (TLS for the box art downloads) — Thomas Pornin, MIT license
+  (`src/third_party/bearssl/LICENSE.txt`, unmodified).
+- **LZMA SDK** (7z decoder) — Igor Pavlov, public domain.
+- **SoundTouch 2.3.3** (audio time stretching below full speed) — Olli Parviainen, LGPL-2.1
+  (`src/third_party/soundtouch/COPYING.TXT`), https://codeberg.org/soundtouch/soundtouch.
+  Only the time-stretching files are used; local change: `override` removed from destructors
+  (rejected by the Xbox 360 SDK's compiler).
+- **CHD**: MAME's "Compressed Hunks of Data" format (Aaron Giles, BSD-3). HarissaDC's reader
+  (`src/disc/chd.cpp`, FLAC decoder and CD ECC included) is its own code.
+- **Box art**: the Redump list of Dreamcast discs from libretro-database
+  (https://github.com/libretro/libretro-database) and pictures from libretro-thumbnails
+  (https://thumbnails.libretro.com), downloaded by the console, never included.
+- **Inter** (interface font, as an atlas) — The Inter Project Authors, SIL Open Font License 1.1
+  (`third_party/inter/OFL.txt`).
+- **Noto Sans Arabic** (Arabic glyphs of the atlas) — The Noto Project Authors, SIL Open Font
+  License 1.1 (`third_party/noto-arabic/OFL.txt`).
+- The sharpening filter follows the idea of AMD FidelityFX CAS (MIT) and the CRT effects Timothy
+  Lottes' CRT shader (public domain).
