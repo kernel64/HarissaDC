@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Xbox 360">
+      <Configuration>Debug</Configuration>
+      <Platform>Xbox 360</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Xbox 360">
+      <Configuration>Release</Configuration>
+      <Platform>Xbox 360</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{3E8A1C52-7D4B-4C19-B6F0-5A2E9D13C847}</ProjectGuid>
+    <Keyword>Xbox360Proj</Keyword>
+    <ProjectName>harissadc</ProjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Xbox 360'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Xbox 360'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+      <PreprocessorDefinitions>_XBOX;_CRT_SECURE_NO_WARNINGS;Z_SOLO;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <CompileAs>CompileAsCpp</CompileAs>
+      <FloatingPointModel>Precise</FloatingPointModel>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(OutDir)$(ProjectName).pdb</ProgramDatabaseFile>
+      <GenerateMapFile>true</GenerateMapFile>
+      <AdditionalOptions>/SECTION:.jitc,ERW %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+    <ImageXex>
+      <ConfigurationFile>title\xex.xml</ConfigurationFile>
+    </ImageXex>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Xbox 360'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>xapilibd.lib;d3d9d.lib;d3dx9d.lib;xgraphicsd.lib;xboxkrnl.lib;xaudiod2.lib;xmcored.lib;xinput2.lib;xnetd.lib;xbdm.lib</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Xbox 360'">
+    <ClCompile>
+      <Optimization>Full</Optimization>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <StringPooling>true</StringPooling>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <OptimizeReferences>true</OptimizeReferences>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <AdditionalDependencies>xapilib.lib;d3d9.lib;d3dx9.lib;xgraphics.lib;xboxkrnl.lib;xaudio2.lib;xmcore.lib;xinput2.lib;xnet.lib</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(EmuTrace)'=='1'">
+    <ClCompile>
+      <PreprocessorDefinitions>EMU_TRACE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\core\*.cpp" />
+    <ClCompile Include="..\..\mem\*.cpp" />
+    <ClCompile Include="..\..\sh4\*.cpp" />
+    <ClCompile Include="..\..\hw\*.cpp" />
+    <ClCompile Include="..\..\disc\*.cpp" />
+    <ClCompile Include="..\..\third_party\lzma\*.c">
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="..\..\bios\*.cpp" />
+    <ClCompile Include="..\..\render\*.cpp" />
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="xb_audio.cpp" />
+    <ClCompile Include="xb_lang.cpp" />
+    <ClCompile Include="xb_menu.cpp" />
+    <ClCompile Include="xb_pad.cpp" />
+    <ClCompile Include="xb_png.cpp" />
+    <ClCompile Include="xb_art.cpp" />
+    <ClCompile Include="xb_update.cpp" />
+    <ClCompile Include="xb_net.cpp">
+      <AdditionalIncludeDirectories>..\..\third_party\bearssl\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="..\..\third_party\bearssl\src\**\*.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <AdditionalIncludeDirectories>..\..\third_party\bearssl\inc;..\..\third_party\bearssl\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>inline=__inline;BR_USE_WIN32_RAND=0;BR_USE_WIN32_TIME=0;BR_USE_URANDOM=0;BR_USE_UNIX_TIME=0;BR_RDRAND=0;BR_AES_X86NI=0;BR_SSE2=0;BR_POWER8=0;BR_INT128=0;BR_UMUL128=0;BR_LE_UNALIGNED=0;BR_BE_UNALIGNED=0;BR_64=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="..\..\third_party\zlib\adler32.c;..\..\third_party\zlib\crc32.c;..\..\third_party\zlib\inffast.c;..\..\third_party\zlib\inflate.c;..\..\third_party\zlib\inftrees.c;..\..\third_party\zlib\zutil.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="..\..\third_party\soundtouch\*.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <PreprocessorDefinitions>SOUNDTOUCH_INTEGER_SAMPLES=1;ST_NO_EXCEPTION_HANDLING=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="xb_codemem.cpp" />
+    <ClCompile Include="xb_diag.cpp" />
+    <ClCompile Include="xb_display.cpp" />
+    <ClCompile Include="xb_emu.cpp" />
+    <ClCompile Include="xb_fs.cpp" />
+    <ClCompile Include="xb_log.cpp" />
+    <ClCompile Include="xb_pvr.cpp" />
+    <ClCompile Include="xb_sampler.cpp" />
+    <ClCompile Include="xb_ui.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\core\*.h" />
+    <ClInclude Include="..\..\mem\*.h" />
+    <ClInclude Include="..\..\sh4\*.h" />
+    <ClInclude Include="..\..\hw\*.h" />
+    <ClInclude Include="..\..\disc\*.h" />
+    <ClInclude Include="..\..\bios\*.h" />
+    <ClInclude Include="..\..\render\*.h" />
+    <ClInclude Include="*.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="title\xex.xml" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

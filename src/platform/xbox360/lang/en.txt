@@ -1,0 +1,222 @@
+# HarissaDC - menu texts, English (the reference: every language has the same keys).
+#
+# One text per line: KEY = text. "\n" starts a new line. %d, %u (numbers) and %s
+# (a word or a name) are filled in by the emulator: keep each of them, in the
+# same order. Button prompts ("A:Select|B:Back") are button:label pairs
+# separated by "|": translate only the labels, never the buttons, and never put
+# ":" or "|" in a label. Keep texts about as short as the English ones: the
+# menus have fixed widths (tools/gen_lang.py checks them).
+#
+# After a change: python src/platform/xbox360/tools/gen_lang.py (writes xb_lang_table.h).
+
+# The language's own name, shown in the language list.
+LANG_NAME = English
+LANG_TITLE = Choose your language
+FOOT_LANG_FIRST = A:Confirm
+FOOT_LANG = A:Confirm|B:Back
+
+# ---- Settings ----
+SETTINGS = Settings
+FOOT_SELECT = A:Select|DPAD:Change|B:Back
+CPU_NEXT = CPU (next start)
+RECOMPILER = Recompiler
+INTERPRETER = Interpreter
+RENDERER_NEXT = Renderer (next start)
+GPU = GPU
+SOFTWARE = Software
+SHOW_FPS = Show FPS
+GRAPHICS = Graphics
+CONTROLS = Controls
+LANGUAGE = Language
+CUSTOM = Custom
+DEFAULT = Default
+SAVE_ALL = Save for all games
+SAVE_GAME = Save for this game only
+BACK = Back
+ON = On
+OFF = Off
+SAVED_ALL = Saved for all games
+SAVED_GAME = Saved for this game
+SETTINGS_WRITE_FAILED = Could not save the settings
+
+# ---- Graphics ----
+PRESET = Preset
+PRESET_ORIGINAL = Original
+PRESET_ENHANCED = Enhanced
+PRESET_SMOOTH = Smooth
+PRESET_CRT = CRT
+ASPECT = Aspect ratio
+ASPECT_43 = 4:3
+ASPECT_WIDE = 16:9
+ASPECT_STRETCH = 16:9 stretched
+PIC_SIZE = Picture size
+PIC_LR = Picture left / right
+PIC_UD = Picture up / down
+BRIGHTNESS = Brightness
+NORMAL = Normal
+LIGHTER = Lighter
+MUCH_LIGHTER = Much lighter
+SMOOTH_SCALING = Smooth scaling
+FXAA = Edge smoothing (FXAA)
+SHARPEN = Sharpening
+LOW = Low
+HIGH = High
+BLUR = Blur
+SOFT = Soft
+STRONG = Strong
+SCREEN_EFFECT = Screen effect
+SCREEN_NONE = None
+SCANLINES = Scanlines
+CRT = CRT
+CRT_CURVED = Curved CRT
+LCD_GRID = LCD grid
+LIGHT_SCANLINES = Light scanlines
+
+# ---- Controls ----
+DC_BUTTON = Dreamcast %s
+DC_START = Start
+DC_LTRIG = L trigger
+DC_RTRIG = R trigger
+ANALOG_STICK = Dreamcast analog stick
+STICK_LEFT = Left stick
+STICK_RIGHT = Right stick
+DEFAULT_CONTROLS = Default controls
+SRC_NONE = None
+SRC_LS = Left stick click
+SRC_RS = Right stick click
+
+# ---- About ----
+ABOUT = About
+ABOUT_VERSION = Version %s
+ABOUT_BUILT = Built %s
+ABOUT_TAGLINE = A Dreamcast emulator for the Xbox 360
+ABOUT_CREATED = Created by
+HEAD_ENGINE = ENGINE
+ENGINE_TEXT = SH-4 to PowerPC dynamic recompiler.\nARM7 and AICA, GD-ROM, Maple.\nPowerVR2 on the Xenos GPU. No Sega BIOS needed (high-level BIOS).
+HEAD_THANKS = ACKNOWLEDGEMENTS
+THANKS_TEXT = Hardware documentation from the Dreamcast homebrew community; nullDC, Flycast and nulldc-360 studied for reference. Interface from Harissa64.
+FOOT_BACK = B:Back
+
+# ---- Dialogs ----
+QUIT_ASK = Quit to the dashboard?
+QUIT = Quit
+FOOT_CONFIRM = A:%s|B:Cancel
+UNPACKING = Unpacking the game
+UNPACK_PROGRESS = %u / %u MB   (once only: the next starts use the unpacked copy)
+FOOT_CANCEL = B:Cancel
+
+# ---- Game list ----
+DISCS = %d discs
+ARCHIVE_NOTE = 7z archive: unpacked once, at its first start
+NO_HEADER = No Dreamcast game header found on this image
+PRODUCT = PRODUCT
+VERSION = VERSION
+FILE = FILE
+NO_GAME = No game found
+COPY_GAMES = Copy .gdi, .cue, .chd or .7z games
+INTO_FOLDER = into %s (one folder per game)
+FOOT_BROWSER = A:Play|LB/RB:Page|LT/RT:Letter|B:Favourite|Y:Settings|X:About|BACK:Dashboard
+FOOT_BROWSER_EMPTY = Y:Settings|X:About|BACK:Dashboard
+
+# ---- In game ----
+PAUSED = Paused
+FOOT_PAUSED = A:Select|B:Resume
+RESUME = Resume
+RESET_GAME = Reset the game
+SAVE_STATE = Save state
+LOAD_STATE = Load state
+CHANGE_DISC = Change disc
+DISC_OF = Disc %d of %d
+BACK_TO_LIST = Back to the game list
+QUIT_DASHBOARD = Quit to the dashboard
+FOOT_SAVE = A:Save|B:Back
+FOOT_LOAD = A:Load|B:Back
+FOOT_INSERT = A:Insert|B:Back
+SLOT_N = Slot %d
+SAVED = Saved
+EMPTY = Empty
+DISC_N = Disc %d
+IN_DRIVE = In the drive
+HINT = BACK: menu    BACK+RB: save    BACK+LB: load
+OSD_NO_STATES = No save states for this disc
+OSD_SAVED = State saved in slot %d
+OSD_LOADED = State loaded from slot %d
+OSD_SLOT_SAVED = Slot %d (saved)
+OSD_SLOT_EMPTY = Slot %d (empty)
+
+# ---- Messages ----
+STATE_NO_MEMORY = Not enough memory for the save state (%u KB).
+STATE_CANNOT_WRITE = Cannot write %s.
+STATE_NONE = No save state in slot %d for this game.
+STATE_OTHER_VERSION = The save state was made by another version of the emulator.
+STATE_OTHER_DISC = The save state was made with disc %u in the drive: change disc first.
+STATE_DAMAGED = The save state cannot be loaded (another version of the emulator, or damaged).
+DISC_ERROR = Disc error
+CANNOT_OPEN_DISC = Cannot open the disc image %s (see the log).
+CANNOT_UNPACK = Cannot unpack the game
+OUT_OF_MEMORY = Out of memory
+OUT_OF_MEMORY_TEXT = The emulated machine could not be allocated.
+BIOS_MISSING = BIOS missing
+NO_DISC = No disc
+NO_DISC_TEXT = Without Sega's BIOS there is no menu to show: choose a game in the list.
+CRASHED = Emulation crashed
+BOOT_FAILED = Boot failed
+BOOT_FAILED_TEXT = The disc could not be booted (no IP.BIN or boot file). See the log.
+ART_DOWNLOADS = Box art downloads
+ART_ALL = Get box art for all games
+DOWNLOADING = Downloading
+ART_PROGRESS = Box art %d / %d
+ART_CONNECTING = Box art: connecting…
+NO_DOWNLOADS = Downloads are not available here
+GETTING_ART = Getting box art for all games…
+ART_DONE = Box art: %d of %d games have a picture
+ART_DONE_LOST = Box art: %d of %d games have a picture (connection lost)
+ART_NO_NETWORK = Box art: no network connection, nothing was downloaded
+FAV_ADDED = Added to favourites
+FAV_REMOVED = Removed from favourites
+UPDATE_AVAILABLE = HarissaDC %s is available on GitHub
+HEAD_BUTTONS = BUTTONS
+HEAD_STICK = ANALOG STICK
+HEAD_DPAD = D-PAD
+PLAYER = Player %d
+USED_WHEN = Used when controller %d is connected
+PRESS_INPUT = Press an input...
+NO_INPUT_SET = None
+PRESS_FOR = Press the input for %s
+FOOT_CTL_BUTTON = A:Set|Y:Add|X:Clear|LB/RB:Player|B:Back
+FOOT_CTL_OTHER = A:Select|DPAD:Change|LB/RB:Player|B:Back
+CANCELLED = Cancelled
+NO_INPUT = No input: unchanged
+INPUT_SET = %s: %s set
+INPUT_ADDED = %s: %s added
+CLICK = Click
+N_INPUTS = %d inputs
+RUMBLE = Vibration
+DPAD_FIXED = Xbox D-pad
+HEAD_MORE = OPTIONS
+DPAD_UP = D-pad up
+DPAD_DOWN = D-pad down
+DPAD_LEFT = D-pad left
+DPAD_RIGHT = D-pad right
+DIR_UP = Up
+DIR_DOWN = Down
+DIR_LEFT = Left
+DIR_RIGHT = Right
+SRC_DUP = D-pad up
+SRC_DDOWN = D-pad down
+SRC_DLEFT = D-pad left
+SRC_DRIGHT = D-pad right
+VSYNC = V-Sync
+VSYNC_STRICT = Strict
+FPS_ONLY = FPS
+FPS_CPU = FPS, CPU, RAM
+FPS_ALL = FPS, CPU, RAM, resolution
+TEXFILTER = Texture filter
+FILTER_NEAREST = Nearest
+FILTER_BILINEAR = Bilinear
+DEAD_ZONE = Dead zone
+SENSITIVITY = Sensitivity
+INVERT = Invert
+X_AND_Y = X and Y
+FILTER_GAME = As the game
+KEEP_HOLDING = Keep holding BACK: game list

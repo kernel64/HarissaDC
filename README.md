@@ -40,14 +40,26 @@ On the first start, choose your language. The game list then shows your games.
 | `.cue` + `.bin` | Redump dumps (GD-ROM layout with `REM HIGH-DENSITY AREA`). |
 | `.chd` | CHD version 5 (`chdman createcd`). Older CHDs: convert with `chdman copy`. |
 | `.iso` | A data track only. |
-| `.7z` | One game per archive; extracted once into `cache\` on the first start. |
+| `.7z`, `.zip` | One game per archive; extracted once into `cache\` on the first start. |
 
-Multi-disc games: name the files `Game (Disc 1).gdi`, `Game (Disc 2).gdi`... and they
-show as one entry. Change discs from the in-game menu.
+### Games on several discs
+
+Put the discs in the same folder and give them the same name with `(Disc 1)`, `(Disc 2)`...
+(`[Disc 2]` and `Disc 2` work too), in any format:
+
+```
+games\Resident Evil Code Veronica\Resident Evil Code Veronica (Disc 1).chd
+games\Resident Evil Code Veronica\Resident Evil Code Veronica (Disc 2).chd
+```
+
+The list shows one entry, which starts disc 1. When the game asks for the next disc,
+press BACK, choose **Change disc**, then the disc: the lid opens and closes as on a
+Dreamcast, and the game goes on.
 
 ## Controls
 
-**Game list**: A play, Y settings, X about, LB / RB page up / down, BACK quit.
+**Game list**: A play, Y settings, X about, LB / RB page up / down, LT / RT previous /
+next letter, B add or remove a favourite (favourites are listed first), BACK quit.
 
 **In game**:
 
@@ -57,18 +69,29 @@ show as one entry. Change discs from the in-game menu.
 | BACK + RB | Quick save in the current slot |
 | BACK + LB | Quick load from the current slot |
 | BACK + D-pad left / right | Change the quick save slot |
+| BACK held (1.5 s) | Back to the game list |
 
 Up to 4 controllers are supported (Dreamcast ports A to D). Every Dreamcast button,
 the D-pad included, can be remapped per player in **Settings > Controls**: select a
-button, press A, then press the Xbox input you want. Vibration (the Dreamcast
-vibration pack) is on by default and can be turned off on the same page.
+button, press A, then press the Xbox input you want. The same page sets, per player,
+which stick is the analog stick, its dead zone, sensitivity and inverted axes. Vibration
+(the Dreamcast vibration pack) is on by default and can be turned off there too.
+
+**Light gun**: Ranger Mission, Sports Shooting USA, SEGA Clay Challenge and Extreme
+Hunting 2 get a light gun by themselves: the left stick aims, RT or A fires, B fires off
+the screen (reload), START is the gun's Start. For other shooting games, add
+`lightgun=1` to `harissadc.ini`.
 
 ## Settings
 
-- **Graphics**: presets (Original, Enhanced, Smooth, CRT), 4:3 or stretched, size and
-  position of the picture, brightness, smoothing, FXAA, sharpening, blur, scanlines,
-  CRT and LCD effects.
-- **CPU / Region / Renderer**: take effect at the next start of a game.
+- **Graphics**: presets (Original, Enhanced, Smooth, CRT); aspect ratio **4:3**, **16:9**
+  (the 3D is drawn wider, more of the scene on the sides) or **16:9 stretched**; size and
+  position of the picture, brightness, V-Sync (off / on / strict), texture filter (as the
+  game, nearest, bilinear), smoothing, FXAA, sharpening, blur, scanlines, CRT and LCD
+  effects. 16:9 and the texture filter need the GPU renderer.
+- **CPU / Renderer**: take effect at the next start of a game.
+- **Show FPS**: off, frame rate, + CPU load and memory, + resolution.
+- The console region (Japan, USA, Europe) is chosen from each disc, nothing to set.
 - Settings are kept with **Save for all games** (or **Save for this game only** from the
   in-game menu).
 
@@ -89,8 +112,14 @@ The emulator also checks GitHub for a newer release when the list opens.
 | `cache\` | Games extracted from `.7z` archives |
 | `harissadc.log` | Log of the last session (attach it to bug reports) |
 
+## Compatibility
+
+[COMPATIBILITY.md](COMPATIBILITY.md) lists the games tested so far and how they run.
+
 ## Known issues
 
+- Windows CE games (their discs show "Powered by Windows CE": Sega Rally 2,
+  Resident Evil 2, Virtua Cop 2...) start but run far too slowly to be played yet.
 - Some games have graphical glitches (wrong colours, things drawn in front of or
   behind others), for example in some menus of Daytona USA 2001.
 - Some cutscenes and videos run slowly (for example in Jet Grind Radio) while the
@@ -107,6 +136,35 @@ Please open an issue on <https://github.com/kernel64/HarissaDC/issues> with:
 - the `harissadc.log` file from the emulator folder, taken right after the problem.
 
 A save state (BACK + RB) made just before the problem is very welcome too.
+
+## Support the project
+
+HarissaDC is free and always will be. It is built in my spare time: every game fixed means hours of tests on a real console. If it gives you good moments with your Dreamcast games and you would like to help it go further, a donation lets me spend more time on it: more games working, better speed, new features.
+
+Any amount helps, and thank you.
+
+### Donate in cryptocurrency
+
+| Currency | Network | Address |
+|---|---|---|
+| Tether (USDT) | TRON (TRC20) | `TMWW2XeV9kY1U9Cv4AeW9Z6oXnuxXyBut8` |
+| Bitcoin (BTC) | Bitcoin | `16GjM9aBDiTEkMyzcMq4sMWpdacc4zWkty` |
+| Ether (ETH) | Ethereum | `0xcb9b2f3563249c9508eae26af396f21926ec928c` |
+| Solana (SOL) | Solana | `mFxWKAEYnV5oKwYwtzmGCNfvWLNyqfL2FBWH3qSLSHU` |
+
+Send each currency only on the network shown on its line: coins sent on another network are lost. Check the address before you send: a transfer can't be cancelled.
+
+### Other ways to help
+
+- Star the repository on GitHub: it helps other players find it.
+- Report a bug in the [issues](https://github.com/kernel64/HarissaDC/issues), with a save state if you can: it is the fastest way to get a game fixed.
+- Tell other Xbox 360 players about HarissaDC.
+
+## Source code
+
+The source code is in this repository, under the GNU GPL version 2 only (see `LICENSE`);
+third-party components keep their own licenses (`THIRD_PARTY_NOTICES.txt`).
+How to build it: [BUILDING.md](BUILDING.md).
 
 ## Credits
 

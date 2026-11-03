@@ -59,6 +59,19 @@ LZMA SDK (7z decoder) - Igor Pavlov
 Placed in the public domain by its author (https://www.7-zip.org/sdk.html).
 
 ================================================================
+SoundTouch 2.3.3 (audio time stretching) - Olli Parviainen
+================================================================
+Copyright (c) Olli Parviainen. https://codeberg.org/soundtouch/soundtouch
+
+SoundTouch is free software, licensed under the GNU Lesser General Public
+License version 2.1 (LGPL-2.1). Its complete source code, as used in
+HarissaDC, is in src/third_party/soundtouch/ with the full license text
+(COPYING.TXT). Local change: "override" removed from destructor
+declarations (the Xbox 360 SDK's compiler rejects it there). You may
+rebuild HarissaDC with a modified SoundTouch from this repository's source
+(see BUILDING.md).
+
+================================================================
 Inter (interface font) - The Inter Project Authors
 ================================================================
 Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter)
