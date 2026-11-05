@@ -16,4 +16,6 @@ void xb_display_preset(Config *c, int preset);
 int xb_display_preset_of(const Config *c);
 const char *xb_display_preset_name(int preset);
 
+extern int g_xb_auto_rotate;
+
 #endif

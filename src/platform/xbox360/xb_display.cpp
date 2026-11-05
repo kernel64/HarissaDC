@@ -166,6 +166,8 @@ static IDirect3DPixelShader9 *pixel_shader(IDirect3DDevice9 *dev, int smooth, in
 
 static float s_rectX, s_rectY, s_rectW = UI_WIDTH, s_rectH = UI_HEIGHT;
 
+int g_xb_auto_rotate;
+
 void xb_display_rect(float *x, float *y, float *w, float *h)
 {
     *x = s_rectX;
@@ -201,7 +203,7 @@ void xb_display_draw(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex, int srcW, in
     tex->GetLevelDesc(0, &td);
     zoom = (cfg->zoom >= 50 && cfg->zoom <= 150 ? cfg->zoom : 100) / 100.0f;
     h = UI_HEIGHT * zoom;
-    rot = cfg->rotate == 90 || cfg->rotate == 270 ? cfg->rotate : 0;
+    rot = cfg->rotate == 0 || cfg->rotate == 90 || cfg->rotate == 270 ? cfg->rotate : g_xb_auto_rotate;
     if (rot) w = h * 3.0f / 4.0f;
     else w = cfg->aspect || td.Width * 9 >= td.Height * 15 ? UI_WIDTH * zoom : h * 4.0f / 3.0f;
     x0 = (UI_WIDTH - w) * 0.5f + cfg->posX;

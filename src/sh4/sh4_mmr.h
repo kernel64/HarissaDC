@@ -44,6 +44,7 @@ void sh4_ocram_write(u32 addr, u32 value, int size);
 void sh4_sq_flush_to(u32 dst, u32 addr);
 
 extern u32 g_sq[2][8];
+extern int g_sh4_tmu_poll_skip;
 
 struct StateIO;
 void sh4_mmr_state(StateIO *io);

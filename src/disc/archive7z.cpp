@@ -214,7 +214,7 @@ static int fatx_char(char c)
     return c != 0 && strchr(" !#$%&'()-.@[]^_`{}~", c) != NULL;
 }
 
-void archive7z_safe_name(const char *in, int index, int maxLen, char *out, int outSize)
+static void safe_name_with(const char *in, const char *suffix, int maxLen, char *out, int outSize)
 {
     char buf[ARCHIVE7Z_NAME_MAX];
     int n = 0, len;
@@ -224,10 +224,8 @@ void archive7z_safe_name(const char *in, int index, int maxLen, char *out, int o
     len = n;
     if (len > maxLen)
     {
-        char suffix[16];
         const char *dot = strrchr(buf, '.');
         int ext = dot && len - (int)(dot - buf) <= 8 ? len - (int)(dot - buf) : 0, keep;
-        sprintf(suffix, "~%d", index);
         keep = maxLen - ext - (int)strlen(suffix);
         if (keep < 1) keep = 1;
         memmove(buf + keep + strlen(suffix), buf + len - ext, ext + 1);
@@ -236,7 +234,14 @@ void archive7z_safe_name(const char *in, int index, int maxLen, char *out, int o
     set_error(out, outSize, buf);
 }
 
-static void out_path(const char *outDir, const char *name, u32 i, char *out, int size)
+void archive7z_safe_name(const char *in, int index, int maxLen, char *out, int outSize)
+{
+    char suffix[16];
+    sprintf(suffix, "~%d", index);
+    safe_name_with(in, suffix, maxLen, out, outSize);
+}
+
+void archive7z_out_path(const char *outDir, const char *name, u32 index, char *out, int size)
 {
     char part[ARCHIVE7Z_NAME_MAX], safe[ARCHIVE7Z_NAME_MAX];
     int n = _snprintf(out, size, "%s", outDir);
@@ -246,10 +251,23 @@ static void out_path(const char *outDir, const char *name, u32 i, char *out, int
         const char *slash = strchr(p, '/');
         int len = slash ? (int)(slash - p) : (int)strlen(p);
         if (len >= (int)sizeof(part)) len = sizeof(part) - 1;
-        memcpy(part, p, len);
-        part[len] = 0;
-        archive7z_safe_name(part, (int)i, ARCHIVE7Z_SAFE_NAME_MAX, safe, sizeof(safe));
-        n += _snprintf(out + n, size - n, "%c%s", PATH_SEP, safe);
+        if (len > 0)
+        {
+            memcpy(part, p, len);
+            part[len] = 0;
+            if (slash)
+            {
+                u32 h = 2166136261u;
+                const char *q;
+                char suffix[16];
+                for (q = name; q < p + len; q++) h = (h ^ (u8)*q) * 16777619u;
+                sprintf(suffix, "~%06X", (unsigned)(h & 0xFFFFFFu));
+                safe_name_with(part, suffix, ARCHIVE7Z_SAFE_NAME_MAX, safe, sizeof(safe));
+            }
+            else
+                archive7z_safe_name(part, (int)index, ARCHIVE7Z_SAFE_NAME_MAX, safe, sizeof(safe));
+            n += _snprintf(out + n, size - n, "%c%s", PATH_SEP, safe);
+        }
         p = slash ? slash + 1 : p + strlen(p);
     }
     out[size - 1] = 0;
@@ -276,7 +294,7 @@ static int sink_open_next(Sink *s)
     while (s->file < s->end && (SzArEx_IsDir(&s->a->db, s->file) || SzArEx_GetFileSize(&s->a->db, s->file) == 0)) s->file++;
     if (s->file >= s->end) return 0;
     entry_name(&s->a->db, s->file, name, sizeof(name));
-    out_path(s->outDir, name, s->file, path, sizeof(path));
+    archive7z_out_path(s->outDir, name, s->file, path, sizeof(path));
     {
         char *sep = strrchr(path, PATH_SEP);
         if (sep)
@@ -496,30 +514,29 @@ static const char *base_name(const char *p)
     return s ? s + 1 : p;
 }
 
-static void patch_sheets(Archive *a, const char *outDir)
+void archive7z_patch_sheets(const char *outDir, u32 count, Archive7zEntryFn get, void *ctx)
 {
     u32 i, j;
-    for (i = 0; i < a->db.NumFiles; i++)
+    for (i = 0; i < count; i++)
     {
         char name[ARCHIVE7Z_NAME_MAX], path[ARCHIVE7Z_NAME_MAX * 2], *text;
         const char *dot;
         long len;
         int changed = 0;
-        if (SzArEx_IsDir(&a->db, i)) continue;
-        entry_name(&a->db, i, name, sizeof(name));
+        if (get(ctx, i, name, sizeof(name))) continue;
         dot = strrchr(name, '.');
         if (!dot || (_stricmp(dot, ".cue") && _stricmp(dot, ".gdi"))) continue;
-        out_path(outDir, name, i, path, sizeof(path));
+        archive7z_out_path(outDir, name, i, path, sizeof(path));
         text = read_small(path, &len);
         if (!text) continue;
-        for (j = 0; j < a->db.NumFiles; j++)
+        for (j = 0; j < count; j++)
         {
             char other[ARCHIVE7Z_NAME_MAX], safe[ARCHIVE7Z_NAME_MAX];
             const char *b;
             char *hit;
-            if (j == i || SzArEx_IsDir(&a->db, j)) continue;
-            entry_name(&a->db, j, other, sizeof(other));
+            if (j == i || get(ctx, j, other, sizeof(other))) continue;
             b = base_name(other);
+            if (!b[0]) continue;
             archive7z_safe_name(b, (int)j, ARCHIVE7Z_SAFE_NAME_MAX, safe, sizeof(safe));
             if (!strcmp(b, safe)) continue;
             while ((hit = strstr(text, b)) != NULL)
@@ -543,6 +560,13 @@ static void patch_sheets(Archive *a, const char *outDir)
     }
 }
 
+static int sz_entry(void *ctx, u32 i, char *name, int size)
+{
+    const CSzArEx *db = (const CSzArEx *)ctx;
+    entry_name(db, i, name, size);
+    return SzArEx_IsDir(db, i) ? 1 : 0;
+}
+
 int archive7z_extract(const char *path, const char *outDir, Archive7zProgress progress, void *user, char *error,
                       int errorSize)
 {
@@ -564,7 +588,7 @@ int archive7z_extract(const char *path, const char *outDir, Archive7zProgress pr
         char name[ARCHIVE7Z_NAME_MAX], p[ARCHIVE7Z_NAME_MAX * 2];
         if (!SzArEx_IsDir(&a.db, i) && SzArEx_GetFileSize(&a.db, i) != 0) continue;
         entry_name(&a.db, i, name, sizeof(name));
-        out_path(outDir, name, i, p, sizeof(p));
+        archive7z_out_path(outDir, name, i, p, sizeof(p));
         if (SzArEx_IsDir(&a.db, i)) archive7z_make_dirs(p);
         else
         {
@@ -590,7 +614,7 @@ int archive7z_extract(const char *path, const char *outDir, Archive7zProgress pr
             return -1;
         }
     }
-    patch_sheets(&a, outDir);
+    archive7z_patch_sheets(outDir, a.db.NumFiles, sz_entry, &a.db);
     archive_close(&a);
     return 0;
 }

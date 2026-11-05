@@ -72,7 +72,10 @@ struct Sh4JitLookup
     const u32 *ramBlock;
     const u8 *blocks;
     u32 blockSize, offPc, offCode, offFpMode, offNextVersion;
+    const u32 *jcache;
 };
+#define SH4_JIT_JCACHE 8192
+extern u32 g_sh4_jit_jcache[SH4_JIT_JCACHE * 8];
 const Sh4JitLookup *sh4_jit_lookup(void);
 
 int sh4_jit_side_exit(u16 op);

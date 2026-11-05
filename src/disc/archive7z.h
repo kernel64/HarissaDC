@@ -28,4 +28,9 @@ void archive7z_make_dirs(const char *path);
 
 void archive7z_safe_name(const char *in, int index, int maxLen, char *out, int outSize);
 
+void archive7z_out_path(const char *outDir, const char *name, u32 index, char *out, int size);
+
+typedef int (*Archive7zEntryFn)(void *ctx, u32 i, char *name, int size);
+void archive7z_patch_sheets(const char *outDir, u32 count, Archive7zEntryFn get, void *ctx);
+
 #endif

@@ -16,7 +16,7 @@ Your reports fill this list: open an issue with the game, its format and what yo
 | Marvel vs. Capcom | Starts | Console | Intro, title and character select at 60 fps. |
 | Marvel vs. Capcom 2 | Playable | Console | 47-60 fps (European version: 50 fps, full speed); characters no longer show broken pieces. |
 | Shenmue | Playable | Console | About 54 fps; changing discs works. |
-| Soulcalibur | Playable | Console | 56-60 fps. |
+| Soulcalibur | Playable | Console | 60 fps, fights included. |
 | Street Fighter III: 3rd Strike | Playable | Console | 60 fps. |
 | Sonic Adventure | Playable | Console | 60 fps. |
 | Sonic Adventure 2 | Starts | Console | Menus at 60 fps; game not checked yet. |

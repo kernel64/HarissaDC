@@ -230,7 +230,15 @@ static void ta_param(const u32 *p)
     u32 pcw = p[0], type = PCW_PARA_TYPE(pcw);
     if (s_taWords + s_paramWords <= TA_MAX_WORDS)
     {
-        memcpy(s_taData + s_taWords, p, s_paramWords * 4);
+        u32 *d = s_taData + s_taWords, k;
+        for (k = 0; k + 4 <= s_paramWords; k += 4)
+        {
+            d[k] = p[k];
+            d[k + 1] = p[k + 1];
+            d[k + 2] = p[k + 2];
+            d[k + 3] = p[k + 3];
+        }
+        for (; k < s_paramWords; k++) d[k] = p[k];
         s_taWords += s_paramWords;
     }
     s_stats.params++;
@@ -428,14 +436,16 @@ void pvr_debug_set(const u32 *regs, const u32 *ta, u32 words)
     s_taWords = words;
 }
 
+int g_pvr_gun_hpos = 286;
+
 void pvr_light_gun(u32 x, u32 y)
 {
     static u32 flip;
     u32 vbOut = (REG(SPG_VBLANK_INT) >> 16) & 0x3FF, line, h;
     int interlaced = (REG(SPG_CONTROL) >> 4) & 1;
-    line = (interlaced ? y / 2 : y) + vbOut;
+    line = interlaced ? y / 2 + vbOut : (REG(0x005F80F0) & 0x3FF) + y;
     line ^= (flip >> 1) & 1;
-    h = (x + 286) ^ (flip & 1);
+    h = (x + (u32)g_pvr_gun_hpos) ^ (flip & 1);
     flip++;
     REG(0x005F80C4) = ((line & 0x3FF) << 16) | (h & 0x3FF);
 }
@@ -548,6 +558,21 @@ void pvr_write(u32 addr, u32 value, int size)
 
 int g_pvr_ta_skip;
 static int s_skipHalf;
+
+void pvr_ta_sq(const u32 *words)
+{
+    if (!g_pvr_ta_skip && s_fifoWords == 0)
+    {
+        u32 n = ta_param_words(words[0]);
+        if (n == 8)
+        {
+            s_paramWords = 8;
+            ta_param(words);
+            return;
+        }
+    }
+    pvr_ta_fifo(words, 8);
+}
 
 void pvr_ta_fifo(const u32 *words, u32 n)
 {

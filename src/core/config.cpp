@@ -170,6 +170,10 @@ static int on_key(void *user, const char *section, const char *key, const char *
     else if (ini_key_is(key, "loadstate")) c->loadState = ini_int(value, c->loadState);
     else if (ini_key_is(key, "tracefield")) c->traceField = ini_int(value, c->traceField);
     else if (ini_key_is(key, "sampler")) c->sampler = ini_bool(value, c->sampler);
+    else if (ini_key_is(key, "gunx")) c->gunX = ini_int(value, c->gunX);
+    else if (ini_key_is(key, "guny")) c->gunY = ini_int(value, c->gunY);
+    else if (ini_key_is(key, "gunhpos")) c->gunHpos = ini_int(value, c->gunHpos);
+    else if (ini_key_is(key, "cable")) c->cable = ini_key_is(value, "vga") ? 1 : ini_key_is(value, "rgb") ? 2 : 0;
     else if (ini_key_is(key, "taskip")) c->taSkip = ini_bool(value, c->taSkip);
     else if (ini_key_is(key, "audioms")) c->audioMs = ini_int(value, c->audioMs);
     else if (ini_key_is(key, "audiostretch")) c->audioStretch = ini_bool(value, c->audioStretch);
@@ -295,7 +299,11 @@ int config_write(const Config *c, int withLastGame, char *out, int size)
             if (r > 0 && n + r < size) n += r;
         }
         {
-            int r = _snprintf(out + n, size - n, "rumble=%d\r\nvsync=%d\r\ntexfilter=%d\r\n", c->rumble, c->vsync, c->texFilter);
+            char rot[8];
+            int r;
+            if (c->rotate == 0 || c->rotate == 90 || c->rotate == 270) _snprintf(rot, sizeof(rot), "%d", c->rotate);
+            else strcpy(rot, "auto");
+            r = _snprintf(out + n, size - n, "rumble=%d\r\nvsync=%d\r\ntexfilter=%d\r\nrotate=%s\r\n", c->rumble, c->vsync, c->texFilter, rot);
             if (r > 0 && n + r < size) n += r;
         }
     }

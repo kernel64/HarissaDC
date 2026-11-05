@@ -16,6 +16,7 @@
 #else
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #ifdef _WIN32
@@ -323,16 +324,57 @@ static void image_fn(void *user, const char *dir, const char *name, int isDir)
     set_add(s->set, path, n);
 }
 
+#define MARKER_VERSION 2
+
+static void tilde_dir_fn(void *user, const char *dir, const char *name, int isDir)
+{
+    int *found = (int *)user;
+    (void)dir;
+    if (isDir && strchr(name, '~')) *found = 1;
+}
+
 static int marker_ok(const char *dir, const char *archive)
 {
     char marker[GAME_PATH_MAX], text[32] = "";
+    char *end;
     FILE *f;
     join(marker, sizeof(marker), dir, MARKER_NAME);
     f = fopen(marker, "rb");
     if (!f) return 0;
     fgets(text, sizeof(text), f);
     fclose(f);
-    return text[0] && _strtoui64(text, NULL, 10) == file_size64(archive);
+    if (!text[0] || _strtoui64(text, &end, 10) != file_size64(archive)) return 0;
+    if (strtol(end, NULL, 10) < MARKER_VERSION)
+    {
+        int found = 0;
+        list_dir(dir, tilde_dir_fn, &found);
+        if (found) return 0;
+    }
+    return 1;
+}
+
+static void remove_tree_fn(void *user, const char *dir, const char *name, int isDir)
+{
+    char path[GAME_PATH_MAX];
+    (void)user;
+    join(path, sizeof(path), dir, name);
+    if (isDir)
+    {
+        list_dir(path, remove_tree_fn, NULL);
+#ifdef _WIN32
+        RemoveDirectoryA(path);
+#else
+        rmdir(path);
+#endif
+    }
+    else
+    {
+#ifdef _WIN32
+        DeleteFileA(path);
+#else
+        remove(path);
+#endif
+    }
 }
 
 int game_cache_images(const char *cacheRoot, const char *path, DiscSet *set)
@@ -364,6 +406,7 @@ int game_resolve(const char *cacheRoot, const char *path, Archive7zProgress prog
         char marker[GAME_PATH_MAX];
         FILE *f;
         game_cache_dir(cacheRoot, path, dir, sizeof(dir));
+        list_dir(dir, remove_tree_fn, NULL);
         archive7z_make_dirs(dir);
         if ((_stricmp(ext_of(path), ".zip") == 0 ? archivezip_extract(path, dir, progress, user, error, errorSize)
                                                  : archive7z_extract(path, dir, progress, user, error, errorSize)) != 0)
@@ -372,7 +415,7 @@ int game_resolve(const char *cacheRoot, const char *path, Archive7zProgress prog
         f = fopen(marker, "wb");
         if (f)
         {
-            fprintf(f, "%llu\n", (unsigned long long)file_size64(path));
+            fprintf(f, "%llu %d\n", (unsigned long long)file_size64(path), MARKER_VERSION);
             fclose(f);
         }
         if (!game_cache_images(cacheRoot, path, &set))

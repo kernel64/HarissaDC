@@ -87,6 +87,8 @@ static u32 tmu_count(int ch)
     return ticks > t->tcnt ? 0 : t->tcnt - (u32)ticks;
 }
 
+int g_sh4_tmu_poll_skip = 1;
+
 static u32 tmu_read(int ch)
 {
     static u64 last;
@@ -94,7 +96,7 @@ static u32 tmu_read(int ch)
     u64 now = sched_now_exact();
     streak = now - last < 1000 ? streak + 1 : 0;
     last = now;
-    if (streak >= 16 && s_tmu[ch].running)
+    if (streak >= 16 && s_tmu[ch].running && g_sh4_tmu_poll_skip)
     {
         g_sh4_idle = 1;
         sh4_break_slice();
@@ -210,7 +212,7 @@ void sh4_sq_flush_to(u32 dst, u32 addr)
     {
         int outer = g_prof_section;
         g_prof_section = PROF_TA;
-        pvr_ta_fifo(g_sq[q], 8);
+        pvr_ta_sq(g_sq[q]);
         g_prof_section = outer;
         return;
     }

@@ -1,5 +1,27 @@
 # Changes
 
+## 0.2.1 (2026-11-05)
+
+**Fixed**
+
+- Soulcalibur was slow in its fights: the game drew 20 pictures a second instead of 60
+  (its frame timing was disturbed). It now runs at full speed.
+- Sound lag: the sound was heard about half a second after the picture in every game. It
+  now follows the picture closely (about 0.1 s), and stays in step after a slowdown.
+- Capcom vs. SNK turned its picture on its side: the automatic orientation now only applies
+  to the arcade conversions made for an upright screen. A new Orientation setting in
+  Graphics (Auto, Normal, 90°, 270°) lets you choose it yourself.
+- Extreme Hunting 2: the shot now lands under the sight (it landed far above it). The game
+  now runs in 480p, as on the arcade machine it comes from. Start it without loading a save
+  state made with an older version.
+- Archives with long folder names: a cache extracted with the old version is extracted
+  again automatically at the next start.
+
+**Known issues**
+
+- Windows CE games (Sega Rally 2, Worms World Party, Resident Evil 2...) are still slow in
+  places: they run below full speed in their heaviest scenes.
+
 ## 0.2.0 (2026-11-04)
 
 The source code is now published in this repository (GPL-2.0-only).

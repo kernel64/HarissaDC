@@ -206,6 +206,7 @@ const Sh4JitLookup *sh4_jit_lookup(void)
     l.offCode = (u32)offsetof(JitBlock, code);
     l.offFpMode = (u32)offsetof(JitBlock, fpMode);
     l.offNextVersion = (u32)offsetof(JitBlock, nextVersion);
+    l.jcache = g_sh4_jit_jcache;
     return &l;
 }
 
@@ -365,6 +366,25 @@ static void unlink_page(u32 page)
     }
 }
 
+EMU_CACHE_ALIGNED u32 g_sh4_jit_jcache[SH4_JIT_JCACHE * 8];
+
+static void jcache_clear_off(u32 off)
+{
+    u32 *e = &g_sh4_jit_jcache[((off >> 1) & (SH4_JIT_JCACHE - 1)) * 8];
+    e[0] = ~0u;
+}
+
+static void jcache_clear_page(u32 page)
+{
+    u32 i, first = (page * 2048) & (SH4_JIT_JCACHE - 1);
+    for (i = 0; i < 2048; i++) g_sh4_jit_jcache[(first + i) * 8] = ~0u;
+}
+
+static void jcache_clear(void)
+{
+    memset(g_sh4_jit_jcache, 0xFF, sizeof(g_sh4_jit_jcache));
+}
+
 static void kill_block(u32 idx)
 {
     while (idx)
@@ -392,6 +412,7 @@ static void clear_page(u32 page)
     s_pages[page] = 0;
     s_spills[page] = 0;
     unlink_page(page);
+    jcache_clear_page(page);
 }
 
 int sh4_jit_ram_has_code(u32 off)
@@ -424,6 +445,7 @@ void sh4_jit_ram_written(u32 off)
 void sh4_jit_flush(void)
 {
     s_fastCount = 0;
+    jcache_clear();
     if (!s_ramBlock) return;
     memset(s_ramBlock, 0, (RAM_SIZE / 2) * sizeof(u32));
     memset(s_pages, 0, sizeof(s_pages));
@@ -891,6 +913,7 @@ static u32 compile_at(u32 off, u32 pc, u32 fpMode, int tier2)
     b->tier2 = (u16)tier2;
     s_blockCount++;
     s_ramBlock[off >> 1] = s_blockCount;
+    jcache_clear_off(off);
     end = off + n * 2 + 2;
     for (a = off & ~511u; a < end && a < RAM_SIZE; a += 512)
     {
@@ -1294,6 +1317,7 @@ int sh4_jit_init(void *execMem, u32 size, void (*flushIcache)(void *addr, u32 le
     PpcCode c;
     u32 *enter;
     if (!execMem || size < (1u << 20)) return -1;
+    jcache_clear();
     s_mem = (u32 *)execMem;
     s_memWords = size / 4;
     s_flush = flushIcache;

@@ -37,6 +37,9 @@ struct Config
     int loadState;
     int traceField;
     int sampler;
+    int gunX, gunY;
+    int gunHpos;
+    int cable;
     int taSkip;
     int audioMs;
     int audioStretch;

@@ -29,6 +29,7 @@ int log_recent(const char **lines, int max);
 #define LOG_ERROR(...) log_write(LOG_LEVEL_ERROR, __VA_ARGS__)
 #define LOG_WARN(...)  log_write(LOG_LEVEL_WARN, __VA_ARGS__)
 #define LOG_INFO(...)  log_write(LOG_LEVEL_INFO, __VA_ARGS__)
-#define LOG_DEBUG(...) log_write(LOG_LEVEL_DEBUG, __VA_ARGS__)
+extern int g_log_level;
+#define LOG_DEBUG(...) do { if (g_log_level >= LOG_LEVEL_DEBUG) log_write(LOG_LEVEL_DEBUG, __VA_ARGS__); } while (0)
 
 #endif

@@ -132,26 +132,13 @@ static int read_entries(FILE *f, ZipEntry **out, char *error, int errorSize)
     return (int)i;
 }
 
-static void out_path(const char *outDir, const char *name, u32 i, char *out, int size)
+static int zip_entry(void *ctx, u32 i, char *name, int size)
 {
-    char part[ARCHIVE7Z_NAME_MAX], safe[ARCHIVE7Z_NAME_MAX];
-    int n = _snprintf(out, size, "%s", outDir);
-    const char *p = name;
-    while (*p && n < size - 1)
-    {
-        const char *slash = strchr(p, '/');
-        int len = slash ? (int)(slash - p) : (int)strlen(p);
-        if (len >= (int)sizeof(part)) len = sizeof(part) - 1;
-        if (len > 0)
-        {
-            memcpy(part, p, len);
-            part[len] = 0;
-            archive7z_safe_name(part, (int)i, ARCHIVE7Z_SAFE_NAME_MAX, safe, sizeof(safe));
-            n += _snprintf(out + n, size - n, "%c%s", PATH_SEP, safe);
-        }
-        p = slash ? slash + 1 : p + strlen(p);
-    }
-    out[size - 1] = 0;
+    const ZipEntry *e = (const ZipEntry *)ctx + i;
+    size_t len = strlen(e->name);
+    _snprintf(name, size, "%s", e->name);
+    name[size - 1] = 0;
+    return len && e->name[len - 1] == '/';
 }
 
 static int extract_entry(FILE *f, const ZipEntry *e, FILE *dst, u8 *in, u8 *outBuf, Archive7zProgress progress,
@@ -239,7 +226,7 @@ int archivezip_extract(const char *path, const char *outDir, Archive7zProgress p
         size_t len = strlen(e[i].name);
         FILE *out;
         int x;
-        out_path(outDir, e[i].name, (u32)i, dst, sizeof(dst));
+        archive7z_out_path(outDir, e[i].name, (u32)i, dst, sizeof(dst));
         if (len && e[i].name[len - 1] == '/')
         {
             archive7z_make_dirs(dst);
@@ -277,6 +264,7 @@ int archivezip_extract(const char *path, const char *outDir, Archive7zProgress p
             r = -1;
         }
     }
+    if (r == 0 && count > 0) archive7z_patch_sheets(outDir, (u32)count, zip_entry, e);
     free(in);
     free(outBuf);
     free(e);

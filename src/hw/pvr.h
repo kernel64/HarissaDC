@@ -15,6 +15,7 @@ void pvr_write(u32 addr, u32 value, int size);
 u32 pvr_area4_read(u32 addr, int size);
 void pvr_area4_write(u32 addr, u32 value, int size);
 void pvr_ta_fifo(const u32 *words, u32 n);
+void pvr_ta_sq(const u32 *words);
 void pvr_ta_dma(u32 dst, u32 src, u32 len);
 
 u32 pvr_frame_count(void);

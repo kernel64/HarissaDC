@@ -282,7 +282,7 @@ void SettingsApplyLanguage(const Config *c)
 enum
 {
     S_CPU = 1, S_RENDERER, S_FPS, S_GRAPHICS, S_CONTROLS, S_LANGUAGE, S_ART_DL, S_ART_ALL, S_SAVE_ALL, S_SAVE_GAME, S_BACK,
-    G_PRESET = 100, G_FORMAT, G_ZOOM, G_POSX, G_POSY, G_BRIGHT, G_VSYNC, G_TEXFILTER, G_SMOOTH, G_FXAA, G_SHARPEN, G_BLUR, G_SCREEN, G_BACK
+    G_PRESET = 100, G_FORMAT, G_ROTATE, G_ZOOM, G_POSX, G_POSY, G_BRIGHT, G_VSYNC, G_TEXFILTER, G_SMOOTH, G_FXAA, G_SHARPEN, G_BLUR, G_SCREEN, G_BACK
 };
 
 static const char *chev(int id)
@@ -387,6 +387,11 @@ static void format_set(Config *c, int f)
     c->aspect = f == 2;
 }
 
+static int rotate_of(const Config *c)
+{
+    return c->rotate == 0 ? 1 : c->rotate == 90 ? 2 : c->rotate == 270 ? 3 : 0;
+}
+
 static void graphics_build(UiMenu *m, const Config *c, int sel)
 {
     static const int levels[3] = { T_OFF, T_LOW, T_HIGH };
@@ -401,6 +406,10 @@ static void graphics_build(UiMenu *m, const Config *c, int sel)
     {
         static const int formats[3] = { T_ASPECT_43, T_ASPECT_WIDE, T_ASPECT_STRETCH };
         UiMenuAdd(m, G_FORMAT, Tr(T_ASPECT), chev(formats[format_of(c)]));
+    }
+    {
+        static const int orients[4] = { T_ORIENT_AUTO, T_ORIENT_NORMAL, T_ORIENT_90, T_ORIENT_270 };
+        UiMenuAdd(m, G_ROTATE, Tr(T_ORIENTATION), chev(orients[rotate_of(c)]));
     }
     UiMenuAdd(m, G_ZOOM, Tr(T_PIC_SIZE), arrows(v, sizeof(v), "%d%%", c->zoom));
     UiMenuAdd(m, G_POSX, Tr(T_PIC_LR), arrows(v, sizeof(v), "%d", c->posX));
@@ -850,6 +859,12 @@ static int settings_change(Config *c, int id, int dir)
         int f = cycle(format_of(c), 3, dir);
         if (f == 1 && !c->gpuRender) f = cycle(f, 3, dir);
         format_set(c, f);
+        return 1;
+    }
+    case G_ROTATE:
+    {
+        static const int values[4] = { -1, 0, 90, 270 };
+        c->rotate = values[cycle(rotate_of(c), 4, dir)];
         return 1;
     }
     case G_VSYNC: c->vsync = cycle(c->vsync, 3, dir); return 1;

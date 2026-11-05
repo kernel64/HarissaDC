@@ -28,6 +28,7 @@
 #include "../../render/ta_scene.h"
 #include "../../sh4/sh4.h"
 #include "../../sh4/sh4_jit.h"
+#include "../../sh4/sh4_mmr.h"
 #include "xb_audio.h"
 #include "xb_codemem.h"
 #include "xb_diag.h"
@@ -214,6 +215,43 @@ static const char *const s_transAlwaysLast[] = {
 static const char *const s_noCountdownSkip[] = {
     "T15113N",
 };
+
+static const char *const s_noTmuPollSkip[] = {
+    "T1401N",
+    "T1401D",
+};
+
+extern int g_sh4_tmu_poll_skip;
+
+static int no_tmu_poll_skip_of(const char *product)
+{
+    size_t k;
+    for (k = 0; k < sizeof(s_noTmuPollSkip) / sizeof(s_noTmuPollSkip[0]); k++)
+        if (!strcmp(product, s_noTmuPollSkip[k])) return 1;
+    return 0;
+}
+
+static int arcade_conversion(const char *product)
+{
+    return strlen(product) == 6 && !strncmp(product, "T00", 3) && product[5] == 'M';
+}
+
+static int rotate_auto(const Config *c)
+{
+    return c->rotate != 0 && c->rotate != 90 && c->rotate != 270;
+}
+
+static const struct { const char *product; int hpos; } s_vgaCable[] = {
+    { "T0025M", 224 },
+};
+
+static int vga_cable_of(const char *product)
+{
+    size_t k;
+    for (k = 0; k < sizeof(s_vgaCable) / sizeof(s_vgaCable[0]); k++)
+        if (!strcmp(product, s_vgaCable[k].product)) return s_vgaCable[k].hpos;
+    return 0;
+}
 
 static int no_countdown_skip_of(const char *product)
 {
@@ -728,7 +766,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
     int skipPresent = 0, skippedLast = 0;
     int audioThread = 0;
     int gunPort = 0;
-    int rotateAuto, rotatePending = 0, rotateStreak = 0;
+    int rotateConv = 0, rotatePending = 0, rotateStreak = 0;
     double fps = 0;
     int result, useReal, outcome = XB_EMU_TO_LIST, quit = 0;
     DWORD backDown = 0;
@@ -759,6 +797,14 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
         }
         if (discs.count > 1) LOG_INFO("[emu] %d discs, disc %d first", discs.count, discs.current + 1);
     }
+    sh4_mmr_set_cable(CABLE_COMPOSITE);
+    if (cfg.gunX > 0) s_gunX = (float)cfg.gunX;
+    if (cfg.gunY > 0) s_gunY = (float)cfg.gunY;
+    {
+        extern int g_pvr_gun_hpos;
+        g_pvr_gun_hpos = cfg.gunHpos > 0 ? cfg.gunHpos : 286;
+    }
+    g_sh4_tmu_poll_skip = 1;
     if (disc && disc[0] && disc_info_read_file(disc, &info) == 0)
     {
         disc_info_folder(&info, gameFolder, sizeof(gameFolder));
@@ -768,6 +814,18 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
         gunPort = gun_port_of(info.product);
         g_ta_trans_always_last = trans_always_last_of(info.product);
         g_sh4_jit_countdown_skip = !no_countdown_skip_of(info.product);
+        g_sh4_tmu_poll_skip = !no_tmu_poll_skip_of(info.product);
+        {
+            int hpos = vga_cable_of(info.product);
+            if (cfg.cable) sh4_mmr_set_cable(cfg.cable == 1 ? CABLE_VGA : CABLE_RGB);
+            else if (hpos) sh4_mmr_set_cable(CABLE_VGA);
+            if (hpos && cfg.gunHpos <= 0)
+            {
+                extern int g_pvr_gun_hpos;
+                g_pvr_gun_hpos = hpos;
+            }
+        }
+        rotateConv = arcade_conversion(info.product);
         if (gunPort)
         {
             cfg.lightGun = 1;
@@ -793,6 +851,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
             xb_sampler_start();
             g_sh4_jit_dispatch_hook = dispatch_count;
             { extern int g_sh4_jit_exit_why; g_sh4_jit_exit_why = 1; }
+            { extern int g_sh4_jit_count_calls; g_sh4_jit_count_calls = 1; }
         }
         if (cfg.fpuBench) xb_fpu_bench();
         s_initDone = 1;
@@ -802,11 +861,10 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
     g_sh4_jit_skips = cfg.jitSkips;
     g_sh4_jit_fastmem = cfg.fastMem;
     g_sh4_jit_idle_skip = cfg.idleSkip;
-    rotateAuto = cfg.rotate != 0 && cfg.rotate != 90 && cfg.rotate != 270;
-    if (rotateAuto) cfg.rotate = 0;
+    g_xb_auto_rotate = 0;
     {
         extern int g_xb_orient;
-        g_xb_orient = rotateAuto;
+        g_xb_orient = rotateConv && rotate_auto(&cfg);
     }
     dc_set_cpu_percent(cfg.sh4Clock > 0 ? cfg.sh4Clock : 100);
     {
@@ -821,7 +879,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
         if (cfg.soundLag > 0) { extern u64 g_sound_lag_max; g_sound_lag_max = (u64)cfg.soundLag * 4535u; }
     }
     sh4_jit_enable(cfg.useJit);
-    xb_audio_set_target_ms(cfg.audioMs > 0 ? cfg.audioMs : 500);
+    xb_audio_set_target_ms(cfg.audioMs > 0 ? cfg.audioMs : 120);
     audioThread = xb_audio_start_thread(aica_audio_read, aica_audio_available, cfg.audioStretch);
     dc_set_slice(cfg.slice);
     arm7_jit_enable(cfg.armJit);
@@ -1156,7 +1214,11 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
                 vsync = 1;
             }
             prof_report(fpsFrames, ms);
-            if (rotateAuto && !cfg.rotate)
+            {
+                extern int g_xb_orient;
+                g_xb_orient = rotateConv && rotate_auto(&cfg) && !g_xb_auto_rotate;
+            }
+            if (rotateConv && rotate_auto(&cfg) && !g_xb_auto_rotate)
             {
                 f32 a, d, u, t;
                 int want = 0;
@@ -1175,7 +1237,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
                 }
                 else if (++rotateStreak >= 2)
                 {
-                    cfg.rotate = want;
+                    g_xb_auto_rotate = want;
                     {
                         extern int g_xb_orient;
                         g_xb_orient = 0;
@@ -1263,6 +1325,16 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
                              w[2] / fpsFrames, w[3] / fpsFrames, w[4] / fpsFrames, w[5] / fpsFrames, w[6] / fpsFrames, w[7] / fpsFrames);
                     memset(g_sh4_jit_lookup_why, 0, sizeof(g_sh4_jit_lookup_why));
                     {
+                        extern u32 g_sh4_jit_call_stats[16];
+                        u32 *k = g_sh4_jit_call_stats;
+                        LOG_INFO("[emu] per field: %u blocks entered, %u calls (%u to leaves <= 16, %u to leaves 17-32, %u through an unknown register), %u rts",
+                                 k[0] / fpsFrames, k[1] / fpsFrames, k[2] / fpsFrames, k[3] / fpsFrames, k[5] / fpsFrames, k[4] / fpsFrames);
+                        LOG_INFO("[emu] calls through an unknown register per field, its literal: none in the block %u, other page %u, "
+                                 "outside the block's parts %u, after a store %u, written %u, computed %u",
+                                 k[8] / fpsFrames, k[9] / fpsFrames, k[10] / fpsFrames, k[11] / fpsFrames, k[12] / fpsFrames, k[13] / fpsFrames);
+                        memset(g_sh4_jit_call_stats, 0, 16 * sizeof(u32));
+                    }
+                    {
                         extern u32 g_sh4_jit_exit_fail[11];
                         u32 *f = g_sh4_jit_exit_fail;
                         LOG_INFO("[emu] indirect exits that missed, per field, by check: 2 %u, 3 %u, 4 %u, 5 %u, 6 %u, 7 %u, 9 %u",
@@ -1291,8 +1363,8 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
             {
                 XbAudioStats as;
                 xb_audio_stats(&as);
-                LOG_INFO("[audio] queue %u ms, rate %u.%03u, %u underruns", as.fillMs, as.ratioPermille / 1000,
-                         as.ratioPermille % 1000, as.underruns);
+                LOG_INFO("[audio] queue %u ms, rate %u.%03u, %u underruns, %u resyncs", as.fillMs, as.ratioPermille / 1000,
+                         as.ratioPermille % 1000, as.underruns, as.resyncs);
             }
             {
                 SoundWaitStats sw;

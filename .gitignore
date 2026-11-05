@@ -1,5 +1,7 @@
+# Reference emulators (study only, never built with the project)
 ref/
 
+# Build outputs
 *.obj
 *.o
 *.a
@@ -31,6 +33,7 @@ out/
 *.opensdf
 ipch/
 
+# Proprietary files: BIOS and games are provided by the user, never committed
 dc_boot.bin
 dc_flash.bin
 dc_flash_wb.bin

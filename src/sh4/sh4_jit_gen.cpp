@@ -45,6 +45,7 @@
 #define OFF_SQKEY ((s32)offsetof(Sh4Ctx, jitSqKey))
 #define OFF_SQPTR ((s32)offsetof(Sh4Ctx, jitSq))
 #define OFF_WHYKEY(i) ((s32)offsetof(Sh4Ctx, jitWhyKey) + 4 * (s32)(i))
+extern int g_sh4_jit_count_calls;
 #define FP_UNKNOWN 0xFFFFFFFFu
 enum { R_CYC = 11, R_T = 30, R_CTX = 31 };
 enum { R_TC_DELTA = 9, R_TC_PAGE = 10 };
@@ -110,6 +111,7 @@ struct Gen
     u8 lastDef, lastDefPrev;
     u32 known;
     u32 knownVal[16];
+    u8 litWhy[16];
     struct
     {
         int active;
@@ -163,6 +165,7 @@ static u32 def(Gen *g, u32 n)
     g->lastDefPrev = g->reg[n];
     g->reg[n] = RS_DIRTY;
     g->known &= ~(1u << n);
+    g->litWhy[n] = 5;
     fwd_drop_reg(g, n);
     return H(n);
 }
@@ -172,6 +175,7 @@ static u32 rw(Gen *g, u32 n)
     get(g, n);
     g->reg[n] = RS_DIRTY;
     g->known &= ~(1u << n);
+    g->litWhy[n] = 5;
     fwd_drop_reg(g, n);
     return H(n);
 }
@@ -348,6 +352,41 @@ static void gen_exit_lookup(PpcCode *c, int mmu, int md, const u32 *exit)
         slow[2] = ppc_bc_fwd(c, 4, 0, PPC_EQ);
         ppc_rlwinm(c, 4, 3, 1, 7, 29);
         if (ram) ppc_patch_here(c, ram);
+        if (mmu)
+        {
+            ppc_rlwinm(c, 8, 7, 0, 14, 10);
+            ppc_ori(c, 8, 8, SH4_JIT_FP_ANY);
+        }
+        {
+            u32 miss[3], hitC[2] = { 0, 0 };
+            ppc_mr(c, 0, 4);
+            ppc_rlwinm(c, 12, 4, 3, 14, 26);
+            ppc_load_ptr_const(c, 5, ppc_addr_of(l->jcache));
+            ppc_add(c, 12, 12, 5);
+            ppc_lwz(c, 6, 0, 12);
+            ppc_cmplw(c, 0, 6, 4);
+            miss[0] = ppc_bc_fwd(c, 4, 0, PPC_EQ);
+            ppc_lwz(c, 6, 4, 12);
+            ppc_cmplw(c, 0, 6, 3);
+            miss[2] = ppc_bc_fwd(c, 4, 0, PPC_EQ);
+            ppc_lwz(c, 6, 8, 12);
+            ppc_cmplw(c, 0, 6, 7);
+            hitC[0] = ppc_bc_fwd(c, 12, 0, PPC_EQ);
+            if (mmu)
+            {
+                ppc_cmplw(c, 0, 6, 8);
+                hitC[1] = ppc_bc_fwd(c, 12, 0, PPC_EQ);
+            }
+            miss[1] = ppc_b_fwd(c);
+            ppc_patch_here(c, hitC[0]);
+            if (hitC[1]) ppc_patch_here(c, hitC[1]);
+            ppc_load_ptr(c, 6, 16, 12);
+            ppc_mtctr(c, 6);
+            ppc_bctr(c);
+            ppc_patch_here(c, miss[0]);
+            ppc_patch_here(c, miss[1]);
+            ppc_patch_here(c, miss[2]);
+        }
         ppc_load_ptr_const(c, 5, ppc_addr_of(l->ramBlock));
         ppc_lwzx(c, 4, 5, 4);
         ppc_cmpwi(c, 0, 4, 0);
@@ -358,11 +397,6 @@ static void gen_exit_lookup(PpcCode *c, int mmu, int md, const u32 *exit)
         ppc_lwz(c, 6, (s32)l->offPc, 5);
         ppc_cmplw(c, 0, 6, 3);
         slow[4] = ppc_bc_fwd(c, 4, 0, PPC_EQ);
-        if (mmu)
-        {
-            ppc_rlwinm(c, 8, 7, 0, 14, 10);
-            ppc_ori(c, 8, 8, SH4_JIT_FP_ANY);
-        }
         ppc_lwz(c, 6, (s32)l->offFpMode, 5);
         ppc_cmplw(c, 0, 6, 7);
         hit = ppc_bc_fwd(c, 12, 0, PPC_EQ);
@@ -391,7 +425,12 @@ static void gen_exit_lookup(PpcCode *c, int mmu, int md, const u32 *exit)
             ppc_patch_here(c, hitAny[0]);
             ppc_patch_here(c, hitAny[1]);
         }
+        ppc_stw(c, 0, 0, 12);
+        ppc_stw(c, 3, 4, 12);
+        ppc_lwz(c, 6, (s32)l->offFpMode, 5);
+        ppc_stw(c, 6, 8, 12);
         ppc_load_ptr(c, 6, (s32)l->offCode, 5);
+        ppc_store_ptr(c, 6, 16, 12);
         ppc_mtctr(c, 6);
         ppc_bctr(c);
         {
@@ -1577,6 +1616,12 @@ static void emit_literal(Gen *g, u32 n, u32 addr, int size)
 {
     int mmu = g->info->mmu;
     u32 off = (mmu ? g->info->physStart + (addr - g->start) : addr) & (RAM_SIZE - 1), sub = off >> 9;
+    u8 why = 0;
+    if (g_sh4_jit_count_calls)
+        why = !(mmu ? (addr ^ g->start) < 1024u : (addr & 0x1C000000u) == 0x0C000000u) ? 1
+                     : !(sub >= g->firstSub && sub <= g->lastSub)                              ? 2
+                     : g->wrote                                                                ? 3
+                     : sh4_jit_literal_written(off)                                            ? 4 : 0;
     if ((mmu ? (addr ^ g->start) < 1024u : (addr & 0x1C000000u) == 0x0C000000u) && sub >= g->firstSub && sub <= g->lastSub &&
         !g->wrote && !sh4_jit_literal_written(off))
     {
@@ -1597,6 +1642,7 @@ static void emit_literal(Gen *g, u32 n, u32 addr, int size)
         ppc_li32(g->c, 3, addr);
         emit_load(g, def(g, n), size);
     }
+    g->litWhy[n] = why;
 }
 
 static s32 pair_off(u32 reg)
@@ -2793,6 +2839,56 @@ static void emit_side_exit(Gen *g, u16 op, s32 rest)
     ppc_patch_here(c, notTaken);
 }
 
+int g_sh4_jit_count_calls;
+u32 g_sh4_jit_call_stats[16];
+
+static void count_bump(Gen *g, int k)
+{
+    PpcCode *c = g->c;
+    if (!g_sh4_jit_count_calls) return;
+    ppc_li32(c, 12, (u32)(size_t)&g_sh4_jit_call_stats[k]);
+    ppc_lwz(c, 4, 0, 12);
+    ppc_addi(c, 4, 4, 1);
+    ppc_stw(c, 4, 0, 12);
+}
+
+static u32 leaf_size(Gen *g, u32 target)
+{
+    u32 i;
+    if ((target & 1) || (g->info->mmu && ((target ^ g->start) & ~0xFFFu))) return 0;
+    for (i = 0; i < 64; i++)
+    {
+        u16 op = code_at(g, target + i * 2), top = op >> 8;
+        if (op == 0x000B) return i + 2;
+        if (top == 0x89 || top == 0x8B || top == 0x8D || top == 0x8F)
+        {
+            if ((s8)(op & 0xFF) < 0) return 0;
+            continue;
+        }
+        if ((op >> 12) == 0xA)
+        {
+            if (op & 0x800) return 0;
+            continue;
+        }
+        if ((op >> 12) == 0xB || (op & 0xF0FF) == 0x0003 || (op & 0xF0FF) == 0x0023 || (op & 0xF0FF) == 0x400B ||
+            (op & 0xF0FF) == 0x402B || op == 0x002B || op == 0x001B || (op & 0xFF00) == 0xC300 ||
+            (op & 0xF0FF) == 0x4022 || (op & 0xF0FF) == 0x402A || (op & 0xF0FF) == 0x4026)
+            return 0;
+    }
+    return 0;
+}
+
+static void count_call(Gen *g, u32 target, int known, int reg)
+{
+    u32 n;
+    if (!g_sh4_jit_count_calls) return;
+    count_bump(g, 1);
+    if (!known) { count_bump(g, 5); count_bump(g, 8 + (reg >= 0 ? g->litWhy[reg] : 0)); return; }
+    n = leaf_size(g, target);
+    if (n && n <= 16) count_bump(g, 2);
+    else if (n && n <= 32) count_bump(g, 3);
+}
+
 static int emit_branch(Gen *g, u16 op)
 {
     PpcCode *c = g->c;
@@ -2833,6 +2929,7 @@ static int emit_branch(Gen *g, u16 op)
     {
         if ((op >> 12) == 0xB)
         {
+            count_call(g, pc + 4 + disp12(op), 1, -1);
             ppc_li32(c, 3, after);
             ppc_stw(c, 3, OFF_PR, R_CTX);
         }
@@ -2844,6 +2941,9 @@ static int emit_branch(Gen *g, u16 op)
         (op & 0xF0FF) == 0x402B || (op & 0xF0FF) == 0x400B || op == 0x000B)
     {
         u16 slotOp = code_at(g, slot);
+        if (op == 0x000B) count_bump(g, 4);
+        else if ((op & 0xF0FF) == 0x0003 || (op & 0xF0FF) == 0x400B)
+            count_call(g, (g->known >> N & 1) ? g->knownVal[N] + ((op & 0xF000) == 0x4000 ? 0 : after) : 0, g->known >> N & 1, (int)N);
         if (op != 0x000B && (g->known >> N & 1))
         {
             u32 target = g->knownVal[N] + ((op & 0xF000) == 0x4000 ? 0 : after);
@@ -2938,6 +3038,7 @@ u32 sh4_jit_gen_block(PpcCode *c, u32 pc, const u32 *ops, u32 n, int endsWithBra
         ppc_addi(c, R_CYC, R_CYC, -cycles);
         add_cold(&g, bail, COLD_BAIL, 0, 0);
     }
+    count_bump(&g, 0);
     if (g_sh4_jit_mark_blocks)
     {
         ppc_li32(c, 3, pc);

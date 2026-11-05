@@ -63,9 +63,14 @@ static u32 tc_tag(u32 va, int md)
     return ((((va >> 10) << 1) | (u32)md) + 1) | (g_ccn.pteh << 24);
 }
 
+#define TC_TRACK 16
+static u16 s_tcSlots[64][TC_TRACK];
+static u8 s_tcCount[64];
+
 static void tc_flush(void)
 {
     memset(s_tc, 0, sizeof(s_tc));
+    memset(s_tcCount, 0, sizeof(s_tcCount));
 }
 
 const void *sh4_mmu_tc(void)
@@ -282,6 +287,19 @@ int sh4_mmu_translate_sq_quiet(u32 va, u32 *pa)
 static void tc_fill(TcEntry *c, const TlbEntry *e, u32 va, int md, u32 tag)
 {
     u32 m = page_mask(e->ptel), epr = (e->ptel >> 5) & 3, f = 0;
+    if (e >= s_utlb && e < s_utlb + 64)
+    {
+        u32 i = (u32)(e - s_utlb), slot = (u32)(c - s_tc), k, n = s_tcCount[i];
+        if (n <= TC_TRACK)
+        {
+            for (k = 0; k < n && s_tcSlots[i][k] != slot; k++) {}
+            if (k == n)
+            {
+                if (n < TC_TRACK) s_tcSlots[i][n] = (u16)slot;
+                s_tcCount[i] = (u8)(n + 1);
+            }
+        }
+    }
     c->tag = tag;
     c->phys = ((e->ptel & 0x1FFFFC00u & ~m) | (va & m)) & ~0x3FFu;
     c->ptel = e->ptel;
@@ -310,7 +328,8 @@ static int s_wceHandler;
 static int kernel_word(u32 addr, u32 *v)
 {
     if ((addr >> 30) != 2 || (addr & 3)) return 0;
-    *v = mem_read32(addr);
+    if ((addr & 0x1C000000u) == 0x0C000000u) *v = buf_r32(g_ram, addr & (RAM_SIZE - 1));
+    else *v = mem_read32(addr);
     return 1;
 }
 
@@ -497,6 +516,27 @@ static int utlb_overlaps(u32 i)
     return 0;
 }
 
+static void tc_drop_entry(u32 i)
+{
+    const TlbEntry *e = &s_utlb[i];
+    u32 n = s_tcCount[i], k;
+    s_tcCount[i] = 0;
+    if (n > TC_TRACK)
+    {
+        tc_drop(e->pteh, e->ptel);
+        return;
+    }
+    if (!(e->ptel & PTEL_V)) return;
+    {
+        u32 m = page_mask(e->ptel), base = (e->pteh & ~m & 0xFFFFFC00u) >> 10, pages = (m + 1) >> 10;
+        for (k = 0; k < n; k++)
+        {
+            TcEntry *c = &s_tc[s_tcSlots[i][k]];
+            if (c->tag && ((((c->tag & 0xFFFFFFu) - 1) >> 1) - base) < pages) memset(c, 0, sizeof(*c));
+        }
+    }
+}
+
 static void ldtlb_at(u64 now)
 {
     u32 urc = (g_ccn.mmucr >> 10) & 63, urb = (g_ccn.mmucr >> 18) & 63;
@@ -505,7 +545,7 @@ static void ldtlb_at(u64 now)
     s_urcAt = now;
     g_ccn.mmucr = (g_ccn.mmucr & ~(63u << 10)) | (urc << 10);
     e = &s_utlb[urc];
-    tc_drop(e->pteh, e->ptel);
+    tc_drop_entry(urc);
     e->pteh = g_ccn.pteh;
     e->ptel = g_ccn.ptel;
     e->ptea = g_ccn.ptea;

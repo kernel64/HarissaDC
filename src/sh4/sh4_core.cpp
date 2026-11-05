@@ -142,16 +142,9 @@ static u32 slow_kind(u32 phys, int write)
 }
 
 #define MMU_READ_FN(name, type, fn) \
-    u32 name(u32 addr, u32 instPc) \
+    static EMU_NOINLINE u32 name##_slow(u32 addr, u32 instPc) \
     { \
-        u32 v, qa; \
-        g_sh4_jit_mmu_abort = 0; \
-        if (sh4_mmu_translate_quiet(addr, MMU_READ, &qa)) \
-        { \
-            g_sh4_inst_pc = instPc; \
-            g_sh4_jit_mmu_slow[slow_kind(qa, 0)]++; \
-            return (u32)fn(qa); \
-        } \
+        u32 v; \
         g_sh4_jit_phase = SH4_PHASE_MMU_SLOW; \
         if (setjmp(s_abort)) \
         { \
@@ -166,19 +159,22 @@ static u32 slow_kind(u32 phys, int write)
         s_abortArmed = 0; \
         g_sh4_jit_phase = SH4_PHASE_CODE; \
         return v; \
-    }
-#define MMU_WRITE_FN(name, type, fn) \
-    void name(u32 addr, u32 value, u32 instPc) \
+    } \
+    u32 name(u32 addr, u32 instPc) \
     { \
         u32 qa; \
         g_sh4_jit_mmu_abort = 0; \
-        if (sh4_mmu_translate_quiet(addr, MMU_WRITE, &qa)) \
+        if (sh4_mmu_translate_quiet(addr, MMU_READ, &qa)) \
         { \
             g_sh4_inst_pc = instPc; \
-            g_sh4_jit_mmu_slow[slow_kind(qa, 1)]++; \
-            fn(qa, (type)value); \
-            return; \
+            g_sh4_jit_mmu_slow[slow_kind(qa, 0)]++; \
+            return (u32)fn(qa); \
         } \
+        return name##_slow(addr, instPc); \
+    }
+#define MMU_WRITE_FN(name, type, fn) \
+    static EMU_NOINLINE void name##_slow(u32 addr, u32 value, u32 instPc) \
+    { \
         g_sh4_jit_phase = SH4_PHASE_MMU_SLOW; \
         if (setjmp(s_abort)) \
         { \
@@ -192,6 +188,19 @@ static u32 slow_kind(u32 phys, int write)
         { u32 pa = sh4_va(addr, MMU_WRITE); g_sh4_jit_mmu_slow[slow_kind(pa, 1)]++; fn(pa, (type)value); } \
         s_abortArmed = 0; \
         g_sh4_jit_phase = SH4_PHASE_CODE; \
+    } \
+    void name(u32 addr, u32 value, u32 instPc) \
+    { \
+        u32 qa; \
+        g_sh4_jit_mmu_abort = 0; \
+        if (sh4_mmu_translate_quiet(addr, MMU_WRITE, &qa)) \
+        { \
+            g_sh4_inst_pc = instPc; \
+            g_sh4_jit_mmu_slow[slow_kind(qa, 1)]++; \
+            fn(qa, (type)value); \
+            return; \
+        } \
+        name##_slow(addr, value, instPc); \
     }
 MMU_READ_FN(sh4_jit_mmu_read8, u8, mem_read8)
 MMU_READ_FN(sh4_jit_mmu_read16, u16, mem_read16)
@@ -245,6 +254,8 @@ void sh4_jit_mmu_write_pair(u32 addr, u32 instPc)
     g_sh4_jit_phase = SH4_PHASE_CODE;
 }
 
+static EMU_NOINLINE void mmu_pref_slow(u32 addr, u32 instPc);
+
 void sh4_jit_mmu_pref(u32 addr, u32 instPc)
 {
     u32 pa;
@@ -255,6 +266,11 @@ void sh4_jit_mmu_pref(u32 addr, u32 instPc)
         sh4_sq_flush_to(pa, addr);
         return;
     }
+    mmu_pref_slow(addr, instPc);
+}
+
+static EMU_NOINLINE void mmu_pref_slow(u32 addr, u32 instPc)
+{
     g_sh4_jit_phase = SH4_PHASE_MMU_SLOW;
     if (setjmp(s_abort))
     {

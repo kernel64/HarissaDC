@@ -22,6 +22,7 @@ void xb_audio_set_target_ms(int ms);
 struct XbAudioStats
 {
     u32 underruns, fillMs, ratioPermille;
+    u32 resyncs;
 };
 void xb_audio_stats(XbAudioStats *out);
 

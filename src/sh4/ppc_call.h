@@ -29,6 +29,15 @@ static inline void ppc_load_ptr(PpcCode *c, u32 rt, s32 off, u32 ra)
 #endif
 }
 
+static inline void ppc_store_ptr(PpcCode *c, u32 rs, s32 off, u32 ra)
+{
+#if defined(SH4_JIT_ABI_XBOX)
+    ppc_stw(c, rs, off, ra);
+#else
+    ppc_std(c, rs, off, ra);
+#endif
+}
+
 static inline void ppc_li32(PpcCode *c, u32 rt, u32 v)
 {
     if ((s32)v >= -32768 && (s32)v <= 32767) ppc_li(c, rt, (s32)v);
