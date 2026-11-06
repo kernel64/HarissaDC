@@ -114,16 +114,29 @@ void ta_scene_free(TaScene *s)
     memset(s, 0, sizeof(*s));
 }
 
-static TaVertex *add_vertex(TaScene *s)
+static EMU_NOINLINE int grow_vertices(TaScene *s)
 {
-    if (s->vertCount == s->vertCap)
+    u32 cap = s->vertCap ? s->vertCap * 2 : 4096;
+    TaVertex *v = (TaVertex *)realloc(s->verts, cap * sizeof(TaVertex));
+    if (!v) return 0;
+    s->verts = v;
+    s->vertCap = cap;
+    return 1;
+}
+
+static EMU_INLINE void note_z(TaScene *s, f32 z)
+{
+    if (z < 1e6f)
     {
-        u32 cap = s->vertCap ? s->vertCap * 2 : 4096;
-        TaVertex *v = (TaVertex *)realloc(s->verts, cap * sizeof(TaVertex));
-        if (!v) return NULL;
-        s->verts = v;
-        s->vertCap = cap;
+        if (z > s->zMax) s->zMax = z;
     }
+    else if (z < 1e37f && z > s->zHuge)
+        s->zHuge = z;
+}
+
+static EMU_INLINE TaVertex *add_vertex(TaScene *s)
+{
+    if (s->vertCount == s->vertCap && !grow_vertices(s)) return NULL;
     return &s->verts[s->vertCount++];
 }
 
@@ -280,7 +293,7 @@ static void decode_sprite(TaScene *s, const u32 *p, const Header *h)
 #define SPRITE_VERTEX(X, Y, Z, U, V) \
     v = add_vertex(s); \
     if (!v) return; \
-    v->x = X; v->y = Y; v->z = Z; v->u = U; v->v = V; v->base = h->spriteBase; v->offset = h->spriteOffset;
+    v->x = X; v->y = Y; v->z = Z; v->u = U; v->v = V; v->base = h->spriteBase; v->offset = h->spriteOffset;     note_z(s, v->z);
     SPRITE_VERTEX(ax, ay, az, au, av);
     SPRITE_VERTEX(bx, by, bz, bu, bv);
     SPRITE_VERTEX(dx, dy, az + cz - bz, au + cu - bu, av + cv - bv);
@@ -315,6 +328,8 @@ void ta_scene_decode(TaScene *s, const u32 *data, u32 words, const u32 *regs)
     h.faceColor = h.faceOffset = 0xFFFFFFFFu;
     s->vertCount = 0;
     s->stripCount = 0;
+    s->zMax = 0.0f;
+    s->zHuge = 0.0f;
     s->modTriCount = 0;
     s->modVolCount = 0;
     decode_background(s, regs);
@@ -409,6 +424,7 @@ void ta_scene_decode(TaScene *s, const u32 *data, u32 words, const u32 *regs)
                 TaVertex *v = add_vertex(s);
                 if (!v) return;
                 decode_vertex(v, p, &h);
+                note_z(s, v->z);
                 strip->count++;
             }
             if ((pcw >> 28) & 1) strip = NULL;

@@ -41,6 +41,7 @@ void config_defaults(Config *c)
     c->rumble = 1;
     c->vsync = 1;
     c->updateCheck = 1;
+    c->hugeDepth = 1;
     c->fastMem = 1;
     c->idleSkip = 1;
     c->sh4Clock = -1;
@@ -173,6 +174,8 @@ static int on_key(void *user, const char *section, const char *key, const char *
     else if (ini_key_is(key, "gunx")) c->gunX = ini_int(value, c->gunX);
     else if (ini_key_is(key, "guny")) c->gunY = ini_int(value, c->gunY);
     else if (ini_key_is(key, "gunhpos")) c->gunHpos = ini_int(value, c->gunHpos);
+    else if (ini_key_is(key, "mmusq")) c->mmuSq = ini_key_is(value, "on") ? 1 : ini_key_is(value, "off") ? 2 : 0;
+    else if (ini_key_is(key, "renderwait")) c->renderWait = ini_key_is(value, "late") ? 1 : ini_key_is(value, "wait") ? 2 : 0;
     else if (ini_key_is(key, "cable")) c->cable = ini_key_is(value, "vga") ? 1 : ini_key_is(value, "rgb") ? 2 : 0;
     else if (ini_key_is(key, "taskip")) c->taSkip = ini_bool(value, c->taSkip);
     else if (ini_key_is(key, "audioms")) c->audioMs = ini_int(value, c->audioMs);
@@ -211,12 +214,17 @@ static int on_key(void *user, const char *section, const char *key, const char *
     else if (ini_key_is(key, "idleskip")) c->idleSkip = ini_bool(value, c->idleSkip);
     else if (ini_key_is(key, "transsort")) c->transSort = ini_bool(value, c->transSort);
     else if (ini_key_is(key, "modvols")) c->modVols = ini_bool(value, c->modVols);
+    else if (ini_key_is(key, "countdown")) c->countdown = ini_key_is(value, "on") || ini_key_is(value, "1") ? 1 : ini_key_is(value, "off") || ini_key_is(value, "0") ? 2 : 0;
+    else if (ini_key_is(key, "exactdepth")) c->exactDepth = ini_key_is(value, "on") || ini_key_is(value, "1") ? 1 : ini_key_is(value, "off") || ini_key_is(value, "0") ? 2 : 0;
+    else if (ini_key_is(key, "hugedepth")) c->hugeDepth = ini_bool(value, c->hugeDepth);
     else if (ini_key_is(key, "transdepth")) c->transDepth = ini_bool(value, c->transDepth);
     else if (ini_key_is(key, "fog")) c->fog = ini_bool(value, c->fog);
     else if (ini_key_is(key, "aicatrace")) c->aicaTrace = ini_bool(value, c->aicaTrace);
     else if (ini_key_is(key, "soundlag")) c->soundLag = ini_int(value, c->soundLag);
     else if (ini_key_is(key, "scenedump")) c->sceneDump = ini_int(value, c->sceneDump);
     else if (ini_key_is(key, "scenedumpcount")) c->sceneDumpCount = ini_int(value, c->sceneDumpCount);
+    else if (ini_key_is(key, "gpudump")) c->gpuDump = ini_int(value, c->gpuDump);
+    else if (ini_key_is(key, "gpudumpcount")) c->gpuDumpCount = ini_int(value, c->gpuDumpCount);
     else if (ini_key_is(key, "scenedumpevery")) c->sceneDumpEvery = ini_int(value, c->sceneDumpEvery);
     else if (ini_key_is(key, "selftest")) c->selfTest = ini_bool(value, c->selfTest);
     else if (ini_key_is(key, "soundthread")) c->soundThread = ini_bool(value, c->soundThread);

@@ -126,6 +126,76 @@ static void twiddle_tables(u32 w, u32 h, u32 *xo, u32 *yo)
 
 static u32 fromBump(u32 c) { return 0xFF000000u | (c & 0xFF) * 0x010101u; }
 
+int tex_rect_ok(const TexDesc *d)
+{
+    u32 tcw = d->tcw, fmt = (tcw >> 27) & 7;
+    if ((tcw >> 31) & 1 || (tcw >> 30) & 1 || fmt == 3 || fmt > 6) return 0;
+    return fmt >= 5 || !((tcw >> 26) & 1);
+}
+
+u32 tex_texels_per_byte2(const TexDesc *d)
+{
+    u32 fmt = (d->tcw >> 27) & 7;
+    return fmt == 5 ? 4 : fmt == 6 ? 2 : 1;
+}
+
+static __inline u32 gather(u32 v)
+{
+    v &= 0x55555555u;
+    v = (v | (v >> 1)) & 0x33333333u;
+    v = (v | (v >> 2)) & 0x0F0F0F0Fu;
+    v = (v | (v >> 4)) & 0x00FF00FFu;
+    return (v | (v >> 8)) & 0x0000FFFFu;
+}
+
+void tex_untwiddle(u32 i, u32 w, u32 h, u32 *x, u32 *y)
+{
+    u32 s = w < h ? w : h, q = i / (s * s), r = i % (s * s);
+    *x = gather(r >> 1);
+    *y = gather(r);
+    if (w >= h) *x += q * s;
+    else *y += q * s;
+}
+
+int tex_decode_rect(const TexDesc *d, const u8 *vram, const u32 *palette, u32 *out, u32 x0, u32 y0, u32 x1, u32 y1)
+{
+    u32 tcw = d->tcw, w = d->width, h = d->height, x, y;
+    u32 fmt = (tcw >> 27) & 7, addr = (tcw & 0x1FFFFF) << 3;
+    u32 xo[1024], yo[1024];
+    if (!tex_rect_ok(d) || w > 1024 || h > 1024 || x1 > w || y1 > h) return -1;
+    for (x = x0; x < x1; x++) xo[x] = w >= h ? (x / h) * h * h + (spread(x % h) << 1) : spread(x) << 1;
+    for (y = y0; y < y1; y++) yo[y] = w >= h ? spread(y) : (y / w) * w * w + spread(y % w);
+    if (fmt >= 5)
+    {
+        u32 bank = fmt == 5 ? ((tcw >> 21) & 63) * 16 : ((tcw >> 25) & 3) * 256, pal[256], i;
+        for (i = 0; i < (fmt == 5 ? 16u : 256u); i++) pal[i] = palette_entry(palette, d->palFormat, bank + i);
+        for (y = y0; y < y1; y++)
+        {
+            u32 *o = out + y * w;
+            if (fmt == 5)
+                for (x = x0; x < x1; x++)
+                {
+                    u32 t = xo[x] + yo[y];
+                    u8 b = buf_r8(vram, (addr + t / 2) & VRAM_MASK);
+                    o[x] = pal[(t & 1) ? (b >> 4) : (b & 15)];
+                }
+            else
+                for (x = x0; x < x1; x++) o[x] = pal[buf_r8(vram, (addr + xo[x] + yo[y]) & VRAM_MASK)];
+        }
+        return 0;
+    }
+    for (y = y0; y < y1; y++)
+    {
+        u32 *o = out + y * w;
+        for (x = x0; x < x1; x++)
+        {
+            u32 c = buf_r16(vram, (addr + (xo[x] + yo[y]) * 2) & VRAM_MASK);
+            o[x] = fmt == 0 ? from1555(c) : fmt == 1 ? from565(c) : fmt == 2 ? from4444(c) : fromBump(c);
+        }
+    }
+    return 0;
+}
+
 int tex_decode(const TexDesc *d, const u8 *vram, const u32 *palette, u32 *out)
 {
     u32 tcw = d->tcw, w = d->width, h = d->height, x, y;

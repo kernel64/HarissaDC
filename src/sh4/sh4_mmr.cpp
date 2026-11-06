@@ -200,6 +200,17 @@ void sh4_sq_flush(u32 addr)
 {
     int q = (addr >> 5) & 1;
     u32 qacr = q ? g_ccn.qacr1 : g_ccn.qacr0;
+    if (g_mmu_sq_only)
+    {
+        static int warned;
+        u32 pa;
+        if (sh4_mmu_translate_sq_quiet(addr, &pa))
+        {
+            sh4_sq_flush_to(pa, addr);
+            return;
+        }
+        if (!warned++) LOG_WARN("[sh4] store queue %08X not mapped by the UTLB: sent through QACR", addr);
+    }
     sh4_sq_flush_to((addr & 0x03FFFFE0u) | (((qacr >> 2) & 7) << 26), addr);
 }
 

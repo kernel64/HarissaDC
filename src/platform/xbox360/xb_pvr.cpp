@@ -5,6 +5,7 @@
 
 #include <xgraphics.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,6 +15,7 @@
 #include "../../mem/mem.h"
 #include "../../render/ta_scene.h"
 #include "../../render/texture.h"
+#include "xb_fs.h"
 
 #define RT_W 1120
 #define RT_H 720
@@ -33,7 +35,13 @@ struct XVtx
     D3DCOLOR base, offs;
     float u, v;
     float fogW;
+    float plane[3];
 };
+
+int g_xb_exact_depth;
+static int s_exactDepth;
+struct RawVtx { f32 x, y, d; };
+static RawVtx s_raw[BATCH_VERTICES];
 
 struct TexEntry
 {
@@ -41,6 +49,7 @@ struct TexEntry
     u32 used;
     IDirect3DTexture9 *tex;
     u32 stamp, vramOff, vramBytes, bytes;
+    u32 *pixels;
 };
 
 struct FrameSlot
@@ -62,7 +71,7 @@ static IDirect3DDevice9 *s_dev;
 static IDirect3DSurface9 *s_rt, *s_depth, *s_back;
 static IDirect3DVertexDeclaration9 *s_decl;
 static IDirect3DVertexShader9 *s_vs;
-static IDirect3DPixelShader9 *s_ps[256];
+static IDirect3DPixelShader9 *s_ps[512];
 static IDirect3DTexture9 *s_fogTex;
 static u32 s_fogHash;
 extern int g_xb_fog, g_xb_trans_depth, g_xb_tex_filter;
@@ -80,6 +89,30 @@ static u32 s_renders;
 static u32 *s_decode;
 static u32 s_palette[1024];
 static float s_depthScale;
+static int s_depthHuge;
+int g_xb_huge_depth = 1;
+static u32 s_hugeFrames;
+static f32 s_hugeMax;
+static f32 s_hugeLo, s_hugeInv;
+
+static EMU_NOINLINE f32 depth_huge(f32 z)
+{
+    f32 d;
+    if (z < 1e6f)
+    {
+        d = z * s_depthScale;
+        return 0.5f * (d < 1.0f ? d : 1.0f);
+    }
+    if (z >= 1e37f) return 1.0f;
+    d = 0.5f + 0.5f * (logf(z) * 1.44269504f - s_hugeLo) * s_hugeInv;
+    return d < 1.0f ? d : 1.0f;
+}
+
+static EMU_INLINE f32 depth_of(f32 z)
+{
+    if (!s_depthHuge) return z * s_depthScale < 1.0f ? z * s_depthScale : 1.0f;
+    return depth_huge(z);
+}
 static int s_rtW, s_rtH;
 static f32 s_xScale, s_yScale;
 static f32 s_xOff;
@@ -103,9 +136,9 @@ static u32 jreg(u32 addr)
 }
 
 static const char s_vsSource[] =
-    "struct VIN { float4 pos : POSITION; float4 base : COLOR0; float4 offs : COLOR1; float2 uv : TEXCOORD0; float fw : TEXCOORD1; };\n"
-    "struct VOUT { float4 pos : POSITION; float4 base : COLOR0; float4 offs : COLOR1; float2 uv : TEXCOORD0; float fw : TEXCOORD1; };\n"
-    "VOUT main(VIN v) { VOUT o; o.pos = v.pos; o.base = v.base; o.offs = v.offs; o.uv = v.uv; o.fw = v.fw; return o; }\n";
+    "struct VIN { float4 pos : POSITION; float4 base : COLOR0; float4 offs : COLOR1; float2 uv : TEXCOORD0; float fw : TEXCOORD1; float3 pl : TEXCOORD2; };\n"
+    "struct VOUT { float4 pos : POSITION; float4 base : COLOR0; float4 offs : COLOR1; float2 uv : TEXCOORD0; float fw : TEXCOORD1; float3 pl : TEXCOORD2; };\n"
+    "VOUT main(VIN v) { VOUT o; o.pos = v.pos; o.base = v.base; o.offs = v.offs; o.uv = v.uv; o.fw = v.fw; o.pl = v.pl; return o; }\n";
 
 static const char s_psSource[] =
     "sampler tex : register(s0);\n"
@@ -113,6 +146,7 @@ static const char s_psSource[] =
     "float4 fogDensity : register(c0);\n"
     "float4 fogColRam : register(c1);\n"
     "float4 fogColVert : register(c2);\n"
+    "float4 taMap : register(c3);\n"
     "float fog_lut(float fw)\n"
     "{\n"
     "  float z = clamp(fogDensity.x / fw, 1.0, 255.9999);\n"
@@ -121,8 +155,18 @@ static const char s_psSource[] =
     "  float4 t = tex2D(fogt, float2((floor(m) + e * 16.0 + 0.5) / 128.0, 0.5));\n"
     "  return lerp(t.r, t.g, m - floor(m));\n"
     "}\n"
-    "float4 main(float4 base : COLOR0, float4 offs : COLOR1, float2 uv : TEXCOORD0, float fw : TEXCOORD1) : COLOR\n"
+    "struct POUT { float4 c : COLOR;\n"
+    "#if EXACT_DEPTH\n"
+    "  float d : DEPTH;\n"
+    "#endif\n"
+    "};\n"
+    "POUT main(float4 base : COLOR0, float4 offs : COLOR1, float2 uv : TEXCOORD0, float fw : TEXCOORD1, float3 pl : TEXCOORD2\n"
+    "#if EXACT_DEPTH\n"
+    "  , float2 vpos : VPOS\n"
+    "#endif\n"
+    "  )\n"
     "{\n"
+    "  POUT o;\n"
     "  float4 c = base;\n"
     "#if !USE_ALPHA\n"
     "  c.a = 1.0;\n"
@@ -153,7 +197,11 @@ static const char s_psSource[] =
     "#elif FOG == 1 && OFFSET\n"
     "  c.rgb = lerp(c.rgb, fogColVert.rgb, offs.a);\n"
     "#endif\n"
-    "  return c;\n"
+    "  o.c = c;\n"
+    "#if EXACT_DEPTH\n"
+    "  o.d = saturate(dot(float3(vpos.x * taMap.x + taMap.y, vpos.y * taMap.z + taMap.w, 1.0), pl));\n"
+    "#endif\n"
+    "  return o;\n"
     "}\n";
 
 static LPD3DXBUFFER compile(const char *src, const char *profile, const D3DXMACRO *defines)
@@ -171,10 +219,11 @@ static LPD3DXBUFFER compile(const char *src, const char *profile, const D3DXMACR
 
 static IDirect3DPixelShader9 *pixel_shader(u32 key)
 {
+    if (s_exactDepth) key |= 0x100;
     if (!s_ps[key])
     {
         static const char *const digits[] = { "0", "1", "2", "3" };
-        D3DXMACRO defs[7];
+        D3DXMACRO defs[8];
         LPD3DXBUFFER code;
         defs[0].Name = "TEXTURED"; defs[0].Definition = digits[key & 1];
         defs[1].Name = "SHADING"; defs[1].Definition = digits[(key >> 1) & 3];
@@ -182,7 +231,8 @@ static IDirect3DPixelShader9 *pixel_shader(u32 key)
         defs[3].Name = "IGNORE_TEX_ALPHA"; defs[3].Definition = digits[(key >> 4) & 1];
         defs[4].Name = "USE_ALPHA"; defs[4].Definition = digits[(key >> 5) & 1];
         defs[5].Name = "FOG"; defs[5].Definition = digits[(key >> 6) & 3];
-        defs[6].Name = NULL; defs[6].Definition = NULL;
+        defs[6].Name = "EXACT_DEPTH"; defs[6].Definition = digits[(key >> 8) & 1];
+        defs[7].Name = NULL; defs[7].Definition = NULL;
         code = compile(s_psSource, "ps_3_0", defs);
         if (!code) return NULL;
         s_dev->CreatePixelShader((const DWORD *)code->GetBufferPointer(), &s_ps[key]);
@@ -237,6 +287,18 @@ static u32 texture_bytes(u32 tcw, u32 w, u32 h, u32 strideWidth)
     return bytes + 64;
 }
 
+#define PIX_MIN_TEXELS (256 * 256)
+#define PIX_MAX_BYTES (48u << 20)
+static u32 s_pixBytes;
+
+static void pixels_free(TexEntry *e)
+{
+    if (!e->pixels) return;
+    free(e->pixels);
+    e->pixels = NULL;
+    s_pixBytes -= e->bytes;
+}
+
 static void texture_cache_clear(void)
 {
     u32 i;
@@ -244,10 +306,60 @@ static void texture_cache_clear(void)
         if (s_tex[i].used)
         {
             retire(s_tex[i].tex);
+            pixels_free(&s_tex[i]);
             s_tex[i].used = 0;
         }
     s_texCount = 0;
     s_texBytes = 0;
+}
+
+#define PART_RECTS 2048
+static u16 s_partX[PART_RECTS], s_partY[PART_RECTS];
+static u32 s_partCount, s_partSide;
+static u32 s_statPartial, s_statFull, s_statFullBig, s_statPages, s_statFallback;
+
+static int tex_partial(TexEntry *e, const TexDesc *d)
+{
+    u32 w = d->width, h = d->height, side = w < h ? w : h, block, tpb2 = tex_texels_per_byte2(d);
+    u32 first = (e->vramOff & (VRAM_SIZE - 1)) >> 12, last = ((e->vramOff & (VRAM_SIZE - 1)) + e->vramBytes - 1) >> 12, pg, dirty = 0;
+    if (side > 32) side = 32;
+    block = side * side;
+    s_partCount = 0;
+    s_partSide = side;
+    if (last >= VRAM_PAGES) last = VRAM_PAGES - 1;
+    for (pg = first; pg <= last; pg++) dirty += g_vram_page_gen[pg] > e->stamp;
+    if (dirty * 2 > last - first + 1)
+    {
+        s_statFallback++;
+        return -1;
+    }
+    s_statPages += dirty;
+    for (pg = first; pg <= last; pg++)
+    {
+        u32 b0, b1, t0, t1, b;
+        if (g_vram_page_gen[pg] <= e->stamp) continue;
+        b0 = pg << 12;
+        b1 = b0 + 4096;
+        if (b0 < (e->vramOff & (VRAM_SIZE - 1))) b0 = e->vramOff & (VRAM_SIZE - 1);
+        b0 -= e->vramOff & (VRAM_SIZE - 1);
+        b1 -= e->vramOff & (VRAM_SIZE - 1);
+        t0 = b0 * tpb2 / 2;
+        t1 = (b1 * tpb2 + 1) / 2;
+        if (t1 > w * h) t1 = w * h;
+        for (b = t0 / block; b * block < t1; b++)
+        {
+            u32 x, y;
+            tex_untwiddle(b * block, w, h, &x, &y);
+            if (tex_decode_rect(d, g_vram, s_palette, e->pixels, x, y, x + side, y + side) != 0) return -1;
+            if (s_partCount < PART_RECTS)
+            {
+                s_partX[s_partCount] = (u16)x;
+                s_partY[s_partCount] = (u16)y;
+            }
+            s_partCount++;
+        }
+    }
+    return 0;
 }
 
 static u32 s_bankHash[64], s_bankHashFor = ~0u;
@@ -304,6 +416,14 @@ void xb_pvr_render_stats(f64 *decodeMs, f64 *opaqueMs, f64 *transMs, u32 *frames
         LOG_INFO("[xenos] translucent per frame: keys %.2f ms, sort %.2f ms, depth pass %.2f ms, %u triangles", s_rtKeys * k / s_rFrames,
                  s_rtSort * k / s_rFrames, s_rtDepth * k / s_rFrames, (u32)(s_rtTris / s_rFrames));
     if (s_rFrames) LOG_INFO("[xenos] texture lookups per frame: %.2f ms", s_rTexLookup * k / s_rFrames);
+    if (s_rFrames)
+        LOG_INFO("[xenos] texture decodes per frame: %.1f partial (%.1f pages), %.1f whole (%.1f big, %.1f with too much written)",
+                 s_statPartial / (f64)s_rFrames, s_statPages / (f64)s_rFrames, s_statFull / (f64)s_rFrames, s_statFullBig / (f64)s_rFrames,
+                 s_statFallback / (f64)s_rFrames);
+    s_statPartial = s_statFull = s_statFullBig = s_statPages = s_statFallback = 0;
+    if (s_rFrames && s_hugeFrames) LOG_INFO("[xenos] %u of %u frames with 1/W beyond 1e6 (up to %g)", s_hugeFrames, (u32)s_rFrames, s_hugeMax);
+    s_hugeFrames = 0;
+    s_hugeMax = 0;
     if (s_rFrames)
         LOG_INFO("[xenos] draw calls per frame: %u, %u vertices, %u indices", (u32)(s_rCalls / s_rFrames), (u32)(s_rVerts / s_rFrames),
                  (u32)(s_rIdx / s_rFrames));
@@ -363,13 +483,6 @@ static IDirect3DTexture9 *get_texture_inner(u32 tcw, u32 tsp)
         texture_cache_clear();
         e = &s_tex[hash];
     }
-    if (e->used)
-    {
-        retire(e->tex);
-        s_texBytes -= e->bytes;
-        s_texCount--;
-    }
-    e->used = 0;
     d.tcw = tcw;
     d.width = w;
     d.height = h;
@@ -378,13 +491,66 @@ static IDirect3DTexture9 *get_texture_inner(u32 tcw, u32 tsp)
     if (fmt >= 5)
         for (i = 0; i < 1024; i++) s_palette[i] = jreg(0x005F9000 + i * 4);
     t0 = prof_ticks();
-    if (tex_decode(&d, g_vram, s_palette, s_decode) != 0) return NULL;
-    t1 = prof_ticks();
-    if (FAILED(s_dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_A8R8G8B8, D3DPOOL_DEFAULT, &e->tex, NULL)) || !e->tex) return NULL;
-    if (SUCCEEDED(e->tex->LockRect(0, &lr, NULL, 0)))
     {
-        for (y = 0; y < h; y++) memcpy((u8 *)lr.pBits + y * lr.Pitch, s_decode + y * w, w * 4);
-        e->tex->UnlockRect(0);
+        const u32 *src = NULL;
+        if (e->used && e->pixels && e->tcw == tcw && e->sizeBits == sizeBits && e->palGen == palGen && tex_partial(e, &d) == 0)
+        {
+            src = e->pixels;
+            s_statPartial++;
+            if (s_partCount <= PART_RECTS)
+            {
+                u32 k, side = s_partSide;
+                t1 = prof_ticks();
+                e->tex->BlockUntilNotBusy();
+                if (SUCCEEDED(e->tex->LockRect(0, &lr, NULL, 0)))
+                {
+                    for (k = 0; k < s_partCount; k++)
+                        for (y = s_partY[k]; y < (u32)s_partY[k] + side; y++)
+                            memcpy((u8 *)lr.pBits + y * lr.Pitch + s_partX[k] * 4, src + y * w + s_partX[k], side * 4);
+                    e->tex->UnlockRect(0);
+                }
+                s_texDecodes++;
+                s_texDecodeTicks += t1 - t0;
+                s_texUploadTicks += prof_ticks() - t1;
+                e->stamp = vram_cache_stamp();
+                return e->tex;
+            }
+        }
+        if (e->used)
+        {
+            retire(e->tex);
+            s_texBytes -= e->bytes;
+            s_texCount--;
+            if (!src) pixels_free(e);
+        }
+        e->used = 0;
+        if (!src)
+        {
+            if (tex_decode(&d, g_vram, s_palette, s_decode) != 0) return NULL;
+            src = s_decode;
+            s_statFull++;
+            if (w * h >= PIX_MIN_TEXELS) s_statFullBig++;
+            if (w * h >= PIX_MIN_TEXELS && tex_rect_ok(&d) && s_pixBytes + w * h * 4 <= PIX_MAX_BYTES)
+            {
+                e->pixels = (u32 *)malloc(w * h * 4);
+                if (e->pixels)
+                {
+                    memcpy(e->pixels, s_decode, w * h * 4);
+                    s_pixBytes += w * h * 4;
+                }
+            }
+        }
+        t1 = prof_ticks();
+        if (FAILED(s_dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_A8R8G8B8, D3DPOOL_DEFAULT, &e->tex, NULL)) || !e->tex)
+        {
+            pixels_free(e);
+            return NULL;
+        }
+        if (SUCCEEDED(e->tex->LockRect(0, &lr, NULL, 0)))
+        {
+            for (y = 0; y < h; y++) memcpy((u8 *)lr.pBits + y * lr.Pitch, src + y * w, w * 4);
+            e->tex->UnlockRect(0);
+        }
     }
     s_texDecodes++;
     s_texDecodeTicks += t1 - t0;
@@ -402,8 +568,43 @@ static IDirect3DTexture9 *get_texture_inner(u32 tcw, u32 tsp)
     return e->tex;
 }
 
+static void set_plane(XVtx *o, const RawVtx *r)
+{
+    f64 x1 = (f64)r[1].x - r[0].x, y1 = (f64)r[1].y - r[0].y, d1 = (f64)r[1].d - r[0].d;
+    f64 x2 = (f64)r[2].x - r[0].x, y2 = (f64)r[2].y - r[0].y, d2 = (f64)r[2].d - r[0].d;
+    f64 det = x1 * y2 - x2 * y1, a = 0, b = 0, c;
+    u32 k;
+    if (det != 0)
+    {
+        a = (d1 * y2 - d2 * y1) / det;
+        b = (x1 * d2 - x2 * d1) / det;
+    }
+    c = (f64)r[0].d - a * r[0].x - b * r[0].y;
+    for (k = 0; k < 3; k++)
+    {
+        o[k].plane[0] = (f32)a;
+        o[k].plane[1] = (f32)b;
+        o[k].plane[2] = (f32)c;
+    }
+}
+
 static void flush(void)
 {
+    if (s_exactDepth)
+    {
+        u32 i;
+        if (s_idxN)
+            for (i = 0; i + 2 < s_idxN; i += 3)
+            {
+                RawVtx r[3];
+                r[0] = s_raw[s_idx[i]];
+                r[1] = s_raw[s_idx[i + 1]];
+                r[2] = s_raw[s_idx[i + 2]];
+                set_plane(&s_batch[s_idx[i]], r);
+            }
+        else
+            for (i = 0; i + 2 < s_batchN; i += 3) set_plane(&s_batch[i], &s_raw[i]);
+    }
     if (s_batchN >= 3)
     {
         s_rCalls++;
@@ -602,12 +803,12 @@ static void apply_state(const TaStrip *s, u32 inside)
     }
 }
 
-static void put_vertex(XVtx *o, const TaVertex *v, const TaVertex *colors)
+static EMU_INLINE void put_vertex(XVtx *o, const TaVertex *v, const TaVertex *colors)
 {
     f32 z = v->z > 1e-9f ? (v->z < 1e6f ? v->z : 1e6f) : 1e-9f, w = 1.0f / z;
     o->x = (v->x * s_xScale - s_xOff) * w;
     o->y = (1.0f - v->y * s_yScale) * w;
-    o->z = (z * s_depthScale < 1.0f ? z * s_depthScale : 1.0f) * w;
+    o->z = depth_of(v->z) * w;
     o->w = w;
     o->base = colors->base;
     o->offs = colors->offset;
@@ -619,6 +820,13 @@ static void put_vertex(XVtx *o, const TaVertex *v, const TaVertex *colors)
         o->v += v->v < s_midV ? s_pullV : v->v > s_midV ? -s_pullV : 0.0f;
     }
     o->fogW = w;
+    if (s_exactDepth)
+    {
+        RawVtx *r = &s_raw[o - s_batch];
+        r->x = v->x;
+        r->y = v->y;
+        r->d = z * s_depthScale;
+    }
 }
 
 static void draw_strip_tri(const TaStrip *s, u32 k)
@@ -647,7 +855,7 @@ static void draw_strip(const TaStrip *s)
 {
     u32 k, n = s->count, base, cull = (s->isp >> 27) & 3;
     const TaVertex *v = &s_scene.verts[s->first];
-    if (!((s->pcw >> 1) & 1) || n > BATCH_VERTICES)
+    if (!((s->pcw >> 1) & 1) || n > BATCH_VERTICES || s_exactDepth)
     {
         for (k = 0; k + 2 < n; k++) draw_strip_tri(s, k);
         return;
@@ -842,7 +1050,14 @@ static void draw_list(u32 list)
     {
         const TaStrip *s = &s_scene.strips[i];
         u32 inside;
+        __dcbt(8 * sizeof(TaStrip), s);
         if (s->list != list || s->count < 3) continue;
+        if (i + 1 < s_scene.stripCount)
+        {
+            const TaVertex *nv = &s_scene.verts[s[1].first];
+            __dcbt(0, nv);
+            __dcbt(128, nv);
+        }
         inside = (s->pcw >> 3) & 1 ? uv_inside(s) : 0;
         if (!prev || !same_state(prev, s) || inside != prevInside)
         {
@@ -1007,6 +1222,9 @@ static void fog_setup(void)
     s_dev->SetSamplerState(1, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
 }
 
+static void gpu_dump(int w, int h);
+static void scene_dump_to(const char *path, const u32 *ta, u32 words, const u32 *regs);
+
 static FrameSlot *frame_slot(u32 addr, int w, int h)
 {
     FrameSlot *best = &s_frames[0];
@@ -1074,10 +1292,33 @@ static void render_frame(void)
     s_xScale = 2.0f / (w * wide);
     s_xOff = 1.0f / wide;
     s_yScale = 2.0f / h;
-    maxZ = s_scene.bgDepth;
-    for (i = 0; i < s_scene.vertCount; i++)
-        if (s_scene.verts[i].z > maxZ && s_scene.verts[i].z < 1e6f) maxZ = s_scene.verts[i].z;
+    maxZ = s_scene.zMax > s_scene.bgDepth ? s_scene.zMax : s_scene.bgDepth;
+    {
+        f32 maxHuge = s_scene.zHuge;
+        s_depthHuge = maxHuge > 0 && g_xb_huge_depth;
+        if (maxHuge > 0)
+        {
+            s_hugeFrames++;
+            if (maxHuge > s_hugeMax) s_hugeMax = maxHuge;
+        }
+        if (s_depthHuge)
+        {
+            f32 range = logf(maxHuge) * 1.44269504f - 19.9315686f;
+            s_hugeLo = 19.9315686f;
+            s_hugeInv = range > 1e-3f ? 1.0f / range : 1.0f;
+        }
+    }
     s_depthScale = maxZ > 0 ? 1.0f / maxZ : 1.0f;
+    s_exactDepth = g_xb_exact_depth && !s_depthHuge;
+    if (s_exactDepth)
+    {
+        f32 m[4];
+        m[0] = 2.0f / ((f32)rtW * s_xScale);
+        m[1] = (1.0f / (f32)rtW - 1.0f + s_xOff) / s_xScale;
+        m[2] = 2.0f / ((f32)rtH * s_yScale);
+        m[3] = 1.0f / ((f32)rtH * s_yScale);
+        s_dev->SetPixelShaderConstantF(3, m, 1);
+    }
 
     s_dev->GetRenderState(D3DRS_HALFPIXELOFFSET, &halfPixel);
     s_dev->SetRenderTarget(0, s_rt);
@@ -1097,7 +1338,7 @@ static void render_frame(void)
         for (i = 0; i < s_scene.modVolCount && !s_modVols; i++)
             s_modVols = s_scene.modVols[i].list == TA_LIST_OPAQUE_MOD && s_scene.modVols[i].count;
     fog_setup();
-    s_dev->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, s_scene.bgColor, s_scene.bgDepth * s_depthScale, 0);
+    s_dev->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, s_scene.bgColor, depth_of(s_scene.bgDepth), 0);
     if (s_modVols)
     {
         s_dev->SetRenderState(D3DRS_STENCILENABLE, TRUE);
@@ -1133,6 +1374,7 @@ static void render_frame(void)
         }
         slot->stamp = vram_cache_stamp();
     }
+    gpu_dump(rtW, rtH);
     s_dev->SetTexture(0, NULL);
     s_dev->SetTexture(1, NULL);
     s_dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
@@ -1159,6 +1401,70 @@ static void wait_job(void)
 
 static char s_dumpPath[128];
 
+static volatile LONG s_gpuDumpLeft;
+static u32 s_gpuDumpNo;
+static IDirect3DTexture9 *s_gpuDumpTex;
+static int s_gpuDumpW, s_gpuDumpH;
+
+void xb_pvr_dump_frames(int count)
+{
+    s_gpuDumpLeft = count;
+}
+
+static void gpu_dump(int w, int h)
+{
+    D3DRECT src;
+    D3DLOCKED_RECT lr;
+    char path[96], name[32];
+    FILE *f;
+    int y;
+    if (s_gpuDumpLeft <= 0) return;
+    if (!s_gpuDumpTex || s_gpuDumpW != w || s_gpuDumpH != h)
+    {
+        if (s_gpuDumpTex) s_gpuDumpTex->Release();
+        s_gpuDumpTex = NULL;
+        if (FAILED(s_dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_A8R8G8B8, D3DPOOL_DEFAULT, &s_gpuDumpTex, NULL))) return;
+        s_gpuDumpW = w;
+        s_gpuDumpH = h;
+    }
+    src.x1 = 0; src.y1 = 0; src.x2 = w; src.y2 = h;
+    s_dev->Resolve(D3DRESOLVE_RENDERTARGET0, &src, s_gpuDumpTex, NULL, 0, 0, NULL, 0.0f, 0, NULL);
+    s_dev->BlockUntilIdle();
+    _snprintf(name, sizeof(name), "gpu_%03u.bmp", s_gpuDumpNo++);
+    xb_fs_data_path(path, sizeof(path), "saves", name);
+    f = fopen(path, "wb");
+    if (f && SUCCEEDED(s_gpuDumpTex->LockRect(0, &lr, NULL, D3DLOCK_READONLY)))
+    {
+        u8 hd[54];
+        u32 size = (u32)(w * h * 4), v;
+        static u32 row[2048];
+        memset(hd, 0, sizeof(hd));
+        hd[0] = 'B'; hd[1] = 'M';
+        v = 54 + size; memcpy(hd + 2, &v, 4); v = _byteswap_ulong(v); memcpy(hd + 2, &v, 4);
+        v = _byteswap_ulong(54u); memcpy(hd + 10, &v, 4);
+        v = _byteswap_ulong(40u); memcpy(hd + 14, &v, 4);
+        v = _byteswap_ulong((u32)w); memcpy(hd + 18, &v, 4);
+        v = _byteswap_ulong((u32)h); memcpy(hd + 22, &v, 4);
+        hd[26] = 1; hd[28] = 32;
+        fwrite(hd, 1, 54, f);
+        for (y = h - 1; y >= 0; y--)
+        {
+            const u32 *p = (const u32 *)((const u8 *)lr.pBits + y * lr.Pitch);
+            int x;
+            for (x = 0; x < w && x < 2048; x++) row[x] = _byteswap_ulong(p[x]);
+            fwrite(row, 4, (size_t)w, f);
+        }
+        s_gpuDumpTex->UnlockRect(0);
+    }
+    if (f) fclose(f);
+    {
+        _snprintf(name, sizeof(name), "gpu_%03u.scene", s_gpuDumpNo - 1);
+        xb_fs_data_path(path, sizeof(path), "saves", name);
+        scene_dump_to(path, s_job.ta, s_job.words, s_job.regs);
+    }
+    InterlockedDecrement(&s_gpuDumpLeft);
+}
+
 void xb_pvr_dump_next_scene(const char *path)
 {
     strncpy(s_dumpPath, path, sizeof(s_dumpPath) - 1);
@@ -1182,19 +1488,24 @@ static int dump_words(HANDLE h, const u32 *p, u32 n)
 
 static void scene_dump(const u32 *ta, u32 words, const u32 *regs)
 {
+    scene_dump_to(s_dumpPath, ta, words, regs);
+}
+
+static void scene_dump_to(const char *path, const u32 *ta, u32 words, const u32 *regs)
+{
     u32 hd[8] = { SCENE_DUMP_MAGIC, 1, PVR_REG_WORDS, words, VRAM_SIZE, 0, 0, 0 };
-    HANDLE h = CreateFileA(s_dumpPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     int ok;
     if (h == INVALID_HANDLE_VALUE)
     {
-        LOG_ERROR("[xenos] cannot write %s", s_dumpPath);
+        LOG_ERROR("[xenos] cannot write %s", path);
         return;
     }
     ok = dump_words(h, hd, 8) == 0 && dump_words(h, regs, PVR_REG_WORDS) == 0 && dump_words(h, ta, words) == 0 &&
          dump_words(h, (const u32 *)g_vram, VRAM_SIZE / 4) == 0;
     CloseHandle(h);
-    if (ok) LOG_INFO("[xenos] scene written to %s (%u TA words)", s_dumpPath, words);
-    else LOG_ERROR("[xenos] writing %s failed", s_dumpPath);
+    if (ok) LOG_INFO("[xenos] scene written to %s (%u TA words)", path, words);
+    else LOG_ERROR("[xenos] writing %s failed", path);
 }
 
 static void render_submit(void)
@@ -1241,9 +1552,11 @@ static DWORD WINAPI render_thread(LPVOID)
     }
 }
 
+int g_xb_pvr_late_wait;
+
 static void render_wait(void)
 {
-    if (s_async) wait_job();
+    if (s_async && !g_xb_pvr_late_wait) wait_job();
 }
 
 int xb_pvr_busy(void)
@@ -1300,6 +1613,7 @@ int xb_pvr_init(IDirect3DDevice9 *dev)
         { 0, 20, D3DDECLTYPE_D3DCOLOR, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_COLOR, 1 },
         { 0, 24, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0 },
         { 0, 32, D3DDECLTYPE_FLOAT1, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 1 },
+        { 0, 36, D3DDECLTYPE_FLOAT3, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 2 },
         D3DDECL_END()
     };
     D3DSURFACE_PARAMETERS sp;

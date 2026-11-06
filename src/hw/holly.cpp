@@ -169,6 +169,7 @@ static void g2_dma(void)
 {
     u32 aica = REG(SB_ADSTAG), ram = REG(SB_ADSTAR), lenReg = REG(SB_ADLEN), len = lenReg & 0x7FFFFFE0u, i;
     int toRam = REG(SB_ADDIR) & 1;
+    LOG_DEBUG("[g2] DMA %s %08X <-> %08X, %u bytes", toRam ? "to RAM" : "to AICA", aica, ram, len);
     for (i = 0; i < len; i += 4)
     {
         if (toRam) mem_write32(ram + i, mem_read32(aica + i));

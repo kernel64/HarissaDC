@@ -455,6 +455,7 @@ static void syscall_gdrom(int second)
             break;
         }
         for (i = 0; i < 4; i++) s_gd.params[i] = R[5] ? mem_read32(R[5] + i * 4) : 0;
+        LOG_DEBUG("[hle]   command %u: %08X %08X %08X %08X", R[4], s_gd.params[0], s_gd.params[1], s_gd.params[2], s_gd.params[3]);
         memset(s_gd.result, 0, sizeof(s_gd.result));
         if (s_gd.nextRequest == 0 || s_gd.nextRequest == 0xFFFFFFFFu) s_gd.nextRequest = 1;
         s_gd.lastRequest = s_gd.nextRequest++;

@@ -12,6 +12,8 @@
 #define MMU_FETCH 2
 
 extern int g_mmu_on;
+extern int g_mmu_sq_only_ok;
+extern int g_mmu_sq_only;
 
 void sh4_mmu_reset(void);
 void sh4_mmu_write_mmucr(u32 value);
@@ -47,5 +49,8 @@ struct StateIO;
 void sh4_mmu_state(StateIO *io);
 
 extern int g_sh4_wince_tlb;
+
+extern u32 *g_mmu_lut[2];
+void sh4_mmu_lut_init(void);
 
 #endif

@@ -44,6 +44,8 @@
 #define OFF_ASIDTAG ((s32)offsetof(Sh4Ctx, jitAsidTag))
 #define OFF_SQKEY ((s32)offsetof(Sh4Ctx, jitSqKey))
 #define OFF_SQPTR ((s32)offsetof(Sh4Ctx, jitSq))
+#define OFF_SQTAG ((s32)offsetof(Sh4Ctx, jitSqTag))
+#define OFF_SQPA ((s32)offsetof(Sh4Ctx, jitSqPa))
 #define OFF_WHYKEY(i) ((s32)offsetof(Sh4Ctx, jitWhyKey) + 4 * (s32)(i))
 extern int g_sh4_jit_count_calls;
 #define FP_UNKNOWN 0xFFFFFFFFu
@@ -135,6 +137,8 @@ static void call_c(PpcCode *c, const void *fn)
     ppc_mtlr(c, 0);
 #endif
 }
+
+static void probe_add(Gen *g, int k, u32 n);
 
 static u32 get(Gen *g, u32 n)
 {
@@ -262,7 +266,13 @@ static void writeback(Gen *g)
 
 static void reload(Gen *g)
 {
-    u32 n;
+    u32 n, k = 0;
+    if (g_sh4_jit_count_calls)
+    {
+        for (n = 0; n < 16; n++) k += (g->reg[n] == RS_NONE) + (g->fr[n] == RS_NONE);
+        k += g->t == RS_NONE;
+        probe_add(g, 9, k);
+    }
     for (n = 0; n < 16; n++) get(g, n);
     getT(g);
     for (n = 0; n < 16; n++) fget(g, n);
@@ -515,12 +525,24 @@ static u32 link_mode(Gen *g)
     return (g->info->fpAny ? SH4_JIT_FP_ANY : g->fp) | g->info->linkMmu;
 }
 
+static void probe_exit(Gen *g)
+{
+    u32 n, k = 0;
+    if (!g_sh4_jit_count_calls) return;
+    for (n = 0; n < 16; n++) k += (g->reg[n] == RS_DIRTY) + (g->fr[n] == RS_DIRTY);
+    k += g->t == RS_DIRTY;
+    probe_add(g, 8, k);
+    probe_add(g, 10, 1);
+    if (g->info->link && g->fp == FP_UNKNOWN) probe_add(g, 4, 1);
+}
+
 static void exit_to(Gen *g, u32 target)
 {
     PpcCode *c = g->c;
     u8 regs[16], frs[16], t = g->t;
     memcpy(regs, g->reg, sizeof(regs));
     memcpy(frs, g->fr, sizeof(frs));
+    probe_exit(g);
     writeback(g);
     u32 off = target, linkable = 0;
     if (g->info->link && g->fp != FP_UNKNOWN && !g->info->mmu)
@@ -599,6 +621,7 @@ static void exit_to(Gen *g, u32 target)
 static void exit_to_reg(Gen *g, u32 r)
 {
     PpcCode *c = g->c;
+    if (r != 4 && r != 12) probe_exit(g);
     writeback(g);
     ppc_stw(c, r, OFF_PC, R_CTX);
     if (g_sh4_jit_direct_indirect && g->info->link && g->fp != FP_UNKNOWN)
@@ -1023,7 +1046,7 @@ static u32 mmu_translate_inline(Gen *g, int size, int store, u32 *br)
     PpcCode *c = g->c;
     u32 nb = 0, tlb, done = 0, hit, alignEnd = size == 4 ? 29 : size == 2 ? 30 : 31;
     int md = g->info->md;
-    ppc_cmpwi(c, 0, 3, 0);
+    if (md || !g_mmu_lut[0] || !g_mmu_lut[1]) ppc_cmpwi(c, 0, 3, 0);
     if (md)
     {
         tlb = ppc_bc_fwd(c, 4, 0, PPC_LT);
@@ -1038,8 +1061,20 @@ static u32 mmu_translate_inline(Gen *g, int size, int store, u32 *br)
         done = ppc_b_fwd(c);
         ppc_patch_here(c, tlb);
     }
-    else
+    else if (!g_mmu_lut[0] || !g_mmu_lut[1])
         br[nb++] = ppc_bc_fwd(c, 12, 0, PPC_LT);
+    if (g_mmu_lut[0] && g_mmu_lut[1])
+    {
+        ppc_rlwinm(c, 6, 3, 22, 10, 29);
+        ppc_load_ptr_const(c, 5, ppc_addr_of(g_mmu_lut[store]));
+        ppc_lwzx(c, 6, 5, 6);
+        ppc_cmpwi(c, 0, 6, -1);
+        br[nb++] = ppc_bc_fwd(c, 12, 0, PPC_EQ);
+        ppc_add(c, 4, 3, 6);
+        ppc_rlwinm(c, 4, 4, 0, 8, alignEnd);
+        if (done) ppc_patch_here(c, done);
+        return nb;
+    }
     if (store)
     {
         ppc_ori(c, 6, 3, 1);
@@ -2232,12 +2267,23 @@ static int emit_native(Gen *g, u16 op)
         }
         if (is_op(op, 0xF0FF, 0x0083) && g->info->mmu)
         {
-            u32 br[1];
+            u32 br[1], notSq;
             fwd_clear(g);
             ppc_mr(c, 3, get(g, n));
             ppc_rlwinm(c, 4, 3, 6, 26, 31);
             ppc_cmplwi(c, 0, 4, 0x38);
-            br[0] = ppc_bc_fwd(c, 12, 0, PPC_EQ);
+            notSq = ppc_bc_fwd(c, 4, 0, PPC_EQ);
+            ppc_rlwinm(c, 6, 3, 0, 0, 21);
+            if (g->info->md) ppc_ori(c, 6, 6, 1);
+            ppc_lwz(c, 5, OFF_SQTAG, R_CTX);
+            ppc_cmplw(c, 0, 5, 6);
+            br[0] = ppc_bc_fwd(c, 4, 0, PPC_EQ);
+            ppc_lwz(c, 5, OFF_SQPA, R_CTX);
+            ppc_mr(c, 4, 3);
+            ppc_rlwinm(c, 3, 3, 0, 22, 26);
+            ppc_or(c, 3, 3, 5);
+            call_c(c, (const void *)sh4_sq_flush_to);
+            ppc_patch_here(c, notSq);
             add_cold_mmu(g, br, 1, COLD_MMU_PREF, 4, 0);
             g->wrote = 1;
             return 1;
@@ -2852,6 +2898,33 @@ static void count_bump(Gen *g, int k)
     ppc_stw(c, 4, 0, 12);
 }
 
+u32 g_sh4_jit_probe[16];
+
+static void probe_add(Gen *g, int k, u32 n)
+{
+    PpcCode *c = g->c;
+    if (!g_sh4_jit_count_calls || !n) return;
+    ppc_li32(c, 12, (u32)(size_t)&g_sh4_jit_probe[k]);
+    ppc_lwz(c, 4, 0, 12);
+    ppc_addi(c, 4, 4, (s32)n);
+    ppc_stw(c, 4, 0, 12);
+}
+
+static void probe_op(Gen *g, u16 op)
+{
+    if (!g_sh4_jit_count_calls) return;
+    if (g->fp == FP_UNKNOWN) probe_add(g, 0, 1);
+    if ((op >> 12) == 0xF)
+    {
+        if (g->fp == FP_UNKNOWN) probe_add(g, 1, 1);
+        else if (g->fp & FPSCR_PR) probe_add(g, 2, 1);
+        if ((op & 0xF3FF) == 0xF1FD) probe_add(g, 6, 1);
+        if ((op & 0xF0FF) == 0xF0ED) probe_add(g, 7, 1);
+    }
+    if ((op & 0xF0FF) == 0x406A || (op & 0xF0FF) == 0x4066) probe_add(g, 3, 1);
+    if ((op & 0xF00F) == 0x3004) probe_add(g, 5, 1);
+}
+
 static u32 leaf_size(Gen *g, u32 target)
 {
     u32 i;
@@ -3051,6 +3124,7 @@ u32 sh4_jit_gen_block(PpcCode *c, u32 pc, const u32 *ops, u32 n, int endsWithBra
         u32 skipTo;
         if (g.skip.active && i == g.skip.index) skip_join(&g);
         g.pc = pc + i * 2;
+        probe_op(&g, op);
         next_op(&g, op);
         mark_write(&g, op);
         if (side && !g.skip.active && (skipTo = sh4_jit_skip_target(ops, i, n)) != 0)

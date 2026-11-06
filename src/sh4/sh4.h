@@ -55,6 +55,8 @@ struct Sh4Ctx
     u32 jitAsidTag;
     u32 jitSqKey;
     u32 *jitSq;
+    u32 jitSqTag;
+    u32 jitSqPa;
 };
 
 extern Sh4Ctx g_sh4;
@@ -72,6 +74,9 @@ void sh4_step(void);
 u32 sh4_get_sr(void);
 void sh4_set_sr(u32 sr);
 void sh4_set_fpscr(u32 fpscr);
+void sh4_apply_rounding(void);
+void sh4_refresh_rounding(void);
+void sh4_host_rounding(void);
 
 enum Sh4Irq
 {

@@ -344,12 +344,14 @@ int dc_state_save(u8 *buf, u32 size)
     return 0;
 }
 
+int g_state_any_layout;
+
 u32 dc_state_bytes(const u8 *buf, u32 size)
 {
     StateHeader h;
     if (size < sizeof(h)) return 0;
     memcpy(&h, buf, sizeof(h));
-    if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.layout != state_layout()) return 0;
+    if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || (h.layout != state_layout() && !g_state_any_layout)) return 0;
     return h.total;
 }
 

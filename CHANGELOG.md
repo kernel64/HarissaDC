@@ -1,5 +1,31 @@
 # Changes
 
+## 0.2.2 (2026-11-06)
+
+**Faster**
+
+- Windows CE games: Sega Rally 2's races run at about 45-50 fps (about 36 before).
+- Extreme Hunting 2 and Dirty Pigskin Football now run at full speed (about 40 and 31 fps
+  before).
+- Samurai Spirits Tenkaichi Kenkakuden: fights run at about 30-45 fps (about 20 before).
+- Games that draw many polygons spend less time preparing each picture.
+
+**Fixed**
+
+- Samurai Spirits Tenkaichi Kenkakuden: the referee and parts of the background were drawn
+  over the fighters.
+- Berserk: in the intro, the horses fell over for a moment and the characters' limbs shook.
+- Shenmue: the music suddenly became much louder a few seconds into a scene; a patch of sky
+  flickered on the ground by the stones outside the house.
+- Sound in every game: notes now fade in and out with the timing of the Dreamcast's sound
+  chip (some ambient sounds rose late, then fell again).
+
+**Known issues**
+
+- Windows CE games (Sega Rally 2, Worms World Party, Resident Evil 2...) are still slow in
+  places.
+- Wacky Races runs its races at about 28 fps.
+
 ## 0.2.1 (2026-11-05)
 
 **Fixed**

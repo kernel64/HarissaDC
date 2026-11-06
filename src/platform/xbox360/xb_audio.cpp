@@ -44,6 +44,19 @@ static int s_lockReady;
 static HANDLE s_thread;
 static volatile LONG s_threadQuit;
 
+int g_xb_audio_measure;
+u32 g_xb_audio_rms[32], g_xb_audio_rms_count;
+
+static void measure_slot(const s16 *p)
+{
+    u64 sum = 0;
+    u32 i;
+    if (!g_xb_audio_measure) return;
+    for (i = 0; i < SLOT_FRAMES * 2; i++) sum += (u64)((s32)p[i] * p[i]);
+    g_xb_audio_rms[g_xb_audio_rms_count & 31] = (u32)sqrt((double)sum / (SLOT_FRAMES * 2.0));
+    g_xb_audio_rms_count++;
+}
+
 static void lock(void)
 {
     if (s_lockReady) EnterCriticalSection(&s_lock);
@@ -207,6 +220,7 @@ static void stretch_feed(u32 (*read)(s16 *out, u32 frames), u32 (*available)(voi
         XAUDIO2_BUFFER b;
         s16 *out = s_slots[s_next];
         s_st->receiveSamples(out, SLOT_FRAMES);
+        measure_slot(out);
         memset(&b, 0, sizeof(b));
         b.AudioBytes = sizeof(s_slots[0]);
         b.pAudioData = (const BYTE *)out;
@@ -267,6 +281,7 @@ static int feed(u32 (*read)(s16 *out, u32 frames), u32 (*available)(void))
         s16 *out = s_slots[s_next];
         if (s_st && s_stretchOn) speed_note(SLOT_FRAMES);
         read(out, SLOT_FRAMES);
+        measure_slot(out);
         memset(&b, 0, sizeof(b));
         b.AudioBytes = sizeof(s_slots[0]);
         b.pAudioData = (const BYTE *)out;

@@ -39,6 +39,8 @@ struct Config
     int sampler;
     int gunX, gunY;
     int gunHpos;
+    int mmuSq;
+    int renderWait;
     int cable;
     int taSkip;
     int audioMs;
@@ -62,11 +64,15 @@ struct Config
     int idleSkip;
     int transSort;
     int modVols;
+    int countdown;
+    int exactDepth;
+    int hugeDepth;
     int transDepth;
     int fog;
     int aicaTrace;
     int soundLag;
     int sceneDump;
+    int gpuDump, gpuDumpCount;
     int sceneDumpCount, sceneDumpEvery;
     int gpuDisplay;
     int showFps;

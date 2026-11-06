@@ -13,6 +13,7 @@ IDirect3DTexture9 *xb_pvr_display(void);
 void xb_pvr_sync(void);
 int xb_pvr_busy(void);
 void xb_pvr_dump_next_scene(const char *path);
+void xb_pvr_dump_frames(int count);
 void xb_pvr_tex_stats(u32 *decodes, f64 *decodeMs, f64 *uploadMs);
 void xb_pvr_render_stats(f64 *decodeMs, f64 *opaqueMs, f64 *transMs, u32 *frames);
 void xb_pvr_orientation(f32 *across, f32 *down, f32 *up);

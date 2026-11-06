@@ -34,6 +34,11 @@ typedef double f64;
 #define EMU_NOINLINE __attribute__((noinline))
 #endif
 #ifdef _MSC_VER
+#define EMU_INLINE __forceinline
+#else
+#define EMU_INLINE inline __attribute__((always_inline))
+#endif
+#ifdef _MSC_VER
 #define EMU_CACHE_ALIGNED __declspec(align(128))
 #else
 #define EMU_CACHE_ALIGNED __attribute__((aligned(128)))

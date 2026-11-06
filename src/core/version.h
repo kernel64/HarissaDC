@@ -6,6 +6,6 @@
 
 #define EMU_NAME      "HarissaDC"
 #define EMU_SHORTNAME "harissadc"
-#define EMU_VERSION   "0.2.1"
+#define EMU_VERSION   "0.2.2"
 
 #endif

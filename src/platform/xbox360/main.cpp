@@ -93,6 +93,7 @@ int __cdecl main()
     pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
     pp.EnableAutoDepthStencil = FALSE;
     pp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+    pp.RingBufferParameters.SecondarySize = 8 * 1024 * 1024;
     if (!d3d || FAILED(d3d->CreateDevice(0, D3DDEVTYPE_HAL, NULL, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev)))
     {
         LOG_ERROR("[main] CreateDevice failed");

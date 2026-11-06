@@ -10,6 +10,10 @@
 #include <setjmp.h>
 #include <stddef.h>
 #include <string.h>
+#include <float.h>
+#ifndef _MSC_VER
+#include <fenv.h>
+#endif
 
 #include "sh4_mmu.h"
 
@@ -25,6 +29,36 @@ int g_sh4_idle;
 
 #define s_breakSlice g_sh4_break
 
+static int s_hostRm = -1;
+
+void sh4_apply_rounding(void)
+{
+    int rm = (int)(C.fpscr & 1);
+    if (rm == s_hostRm) return;
+    s_hostRm = rm;
+#ifdef _MSC_VER
+    _controlfp(rm ? _RC_CHOP : _RC_NEAR, _MCW_RC);
+#else
+    fesetround(rm ? FE_TOWARDZERO : FE_TONEAREST);
+#endif
+}
+
+void sh4_refresh_rounding(void)
+{
+    s_hostRm = -1;
+    sh4_apply_rounding();
+}
+
+void sh4_host_rounding(void)
+{
+    s_hostRm = -1;
+#ifdef _MSC_VER
+    _controlfp(_RC_NEAR, _MCW_RC);
+#else
+    fesetround(FE_TONEAREST);
+#endif
+}
+
 void sh4_reset(void)
 {
     memset(&C, 0, sizeof(C));
@@ -34,6 +68,7 @@ void sh4_reset(void)
     C.vbr = 0;
     C.fpscr = 0x00040001u;
     g_sh4_irq_ready = 0;
+    s_hostRm = -1;
 }
 
 static __inline int bank_of(u32 sr)
@@ -68,6 +103,7 @@ void sh4_set_fpscr(u32 fpscr)
     fpscr &= FPSCR_MASK;
     if ((fpscr ^ C.fpscr) & FPSCR_FR) sh4_fpu_bank_swap();
     C.fpscr = fpscr;
+    sh4_apply_rounding();
 }
 
 static void enter_handler(u32 spc, u32 vectorOffset)
@@ -85,6 +121,8 @@ static jmp_buf s_abort;
 static int s_abortArmed;
 
 u32 g_sh4_exc_counts[64];
+u32 g_sh4_trap_counts[256][2];
+u32 g_sh4_trap_total;
 void (*g_sh4_exception_hook)(u32 expevt);
 
 static void wince_debug_string(u32 va)
@@ -106,6 +144,16 @@ static void wince_debug_string(u32 va)
 static void raise_exception(u32 expevt, u32 vectorOffset)
 {
     g_sh4_exc_counts[(expevt >> 5) & 63]++;
+    if (expevt == 0x0E0 && g_ccn.tea >= 0xFFFFF000u && g_ccn.tea == g_sh4_inst_pc)
+    {
+        u32 h = (g_ccn.tea * 2654435761u) >> 24, k;
+        g_sh4_trap_total++;
+        for (k = 0; k < 8; k++, h = (h + 1) & 255)
+        {
+            if (g_sh4_trap_counts[h][0] == g_ccn.tea) { g_sh4_trap_counts[h][1]++; break; }
+            if (!g_sh4_trap_counts[h][1]) { g_sh4_trap_counts[h][0] = g_ccn.tea; g_sh4_trap_counts[h][1] = 1; break; }
+        }
+    }
     if (expevt == 0x0E0 && (g_ccn.tea == 0xFFFFFDD3u || g_ccn.tea == 0xFFFFD5EFu) && log_level() >= LOG_LEVEL_DEBUG)
         wince_debug_string(C.r[4]);
     LOG_DEBUG("[sh4] exception %03X at %08X, TEA %08X, pr %08X, asid %02X, r4 %08X r5 %08X r6 %08X r7 %08X sp %08X", expevt, g_sh4_inst_pc,
@@ -393,4 +441,5 @@ void sh4_state(StateIO *io)
 {
     state_tag(io, "SH4 ");
     state_io(io, &g_sh4, (u32)offsetof(Sh4Ctx, jitRam));
+    if (io->loading) s_hostRm = -1;
 }

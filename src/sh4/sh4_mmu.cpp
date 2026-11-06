@@ -12,6 +12,7 @@
 #elif defined(_MSC_VER)
 #include <intrin.h>
 #endif
+#include <stdlib.h>
 #include <string.h>
 
 #include "../core/log.h"
@@ -20,6 +21,8 @@
 #include "../mem/mem.h"
 
 int g_mmu_on;
+int g_mmu_sq_only_ok;
+int g_mmu_sq_only;
 
 #define PTEL_V 0x100u
 #define PTEL_D 0x004u
@@ -55,6 +58,7 @@ struct TcEntry
     u32 ramDelta, pad;
 };
 static TcEntry s_tc[TC_SIZE];
+extern u32 g_mmu_stats[16];
 typedef char TcEntrySize[sizeof(TcEntry) == MMU_TC_ENTRY && offsetof(TcEntry, tagRead) == MMU_TC_OFF_TAG_READ &&
                          offsetof(TcEntry, tagWrite) == MMU_TC_OFF_TAG_WRITE && offsetof(TcEntry, ramDelta) == MMU_TC_OFF_RAM_DELTA ? 1 : -1];
 
@@ -67,10 +71,78 @@ static u32 tc_tag(u32 va, int md)
 static u16 s_tcSlots[64][TC_TRACK];
 static u8 s_tcCount[64];
 
+#define KNOWN_SLOTS 32768
+static u32 s_knownKey[KNOWN_SLOTS], s_knownPtel[KNOWN_SLOTS], s_knownPtea[KNOWN_SLOTS];
+static u32 s_knownCount;
+
+static void known_flush(void)
+{
+    memset(s_knownKey, 0, sizeof(s_knownKey));
+    s_knownCount = 0;
+}
+
+static u32 known_slot(u32 key)
+{
+    u32 h = (key * 2654435761u) >> 17, i;
+    for (i = 0; i < KNOWN_SLOTS; i++)
+    {
+        u32 k = (h + i) & (KNOWN_SLOTS - 1);
+        if (s_knownKey[k] == key || !s_knownKey[k]) return k;
+    }
+    return ~0u;
+}
+
+static u32 known_key(u32 asid, u32 va)
+{
+    return ((asid << 20) | (va >> 12)) + 1;
+}
+
+u32 *g_mmu_lut[2];
+#define LUT_PAGES (1u << 20)
+#define LUT_TRACK 16384
+static u32 s_lutFilled[LUT_TRACK], s_lutCount;
+static int s_lutOverflow;
+
+void sh4_mmu_lut_init(void)
+{
+    int k;
+    for (k = 0; k < 2; k++)
+    {
+        if (!g_mmu_lut[k]) g_mmu_lut[k] = (u32 *)malloc(LUT_PAGES * sizeof(u32));
+        if (g_mmu_lut[k]) memset(g_mmu_lut[k], 0xFF, LUT_PAGES * sizeof(u32));
+    }
+    s_lutCount = 0;
+    s_lutOverflow = 0;
+}
+
+static void lut_clear_all(void)
+{
+    u32 i;
+    if (!g_mmu_lut[0] || !g_mmu_lut[1]) return;
+    if (s_lutOverflow)
+    {
+        sh4_mmu_lut_init();
+        return;
+    }
+    for (i = 0; i < s_lutCount; i++) g_mmu_lut[0][s_lutFilled[i]] = g_mmu_lut[1][s_lutFilled[i]] = ~0u;
+    g_mmu_stats[12] += s_lutCount;
+    s_lutCount = 0;
+}
+
+static void lut_clear_range(u32 va, u32 n)
+{
+    u32 first = va >> 12, last = (va + n * 0x400u - 1) >> 12, i;
+    if (!g_mmu_lut[0] || !g_mmu_lut[1]) return;
+    for (i = first; i <= last && i < LUT_PAGES; i++) g_mmu_lut[0][i] = g_mmu_lut[1][i] = ~0u;
+}
+
 static void tc_flush(void)
 {
+    g_sh4.jitSqTag = ~0u;
+    lut_clear_all();
     memset(s_tc, 0, sizeof(s_tc));
     memset(s_tcCount, 0, sizeof(s_tcCount));
+    known_flush();
 }
 
 const void *sh4_mmu_tc(void)
@@ -219,6 +291,10 @@ u32 sh4_mmu_translate_sq(u32 va)
 
 static void tc_fill(TcEntry *c, const TlbEntry *e, u32 va, int md, u32 tag);
 static int wince_refill(u32 va, int write);
+static const TlbEntry *known_find(u32 va, TlbEntry *tmp);
+static void known_note(const TlbEntry *e);
+static void tc_drop(u32 pteh, u32 ptel);
+static void lut_fill(u32 va, const TcEntry *c);
 
 int sh4_mmu_translate_quiet(u32 va, int access, u32 *pa)
 {
@@ -245,7 +321,9 @@ int sh4_mmu_translate_quiet(u32 va, int access, u32 *pa)
     c = &s_tc[(va >> 10) & (TC_SIZE - 1)];
     if (c->tag != tag)
     {
+        TlbEntry tmp;
         const TlbEntry *e = utlb_search(va, md);
+        if (!e) e = known_find(va, &tmp);
         if (!e && wince_refill(va, write)) e = utlb_search(va, md);
         if (!e) return 0;
         tc_fill(c, e, va, md, tag);
@@ -258,6 +336,7 @@ int sh4_mmu_translate_quiet(u32 va, int access, u32 *pa)
     }
     else if ((!md && !(pr & 2)) || (write && !(pr & 1)) || (write && !(ptel & PTEL_D)))
         return 0;
+    lut_fill(va, c);
     *pa = c->phys | (va & 0x3FFu);
     return 1;
 }
@@ -281,12 +360,15 @@ int sh4_mmu_translate_sq_quiet(u32 va, u32 *pa)
     pr = (ptel >> 5) & 3;
     if ((!md && !(pr & 2)) || !(pr & 1) || !(ptel & PTEL_D)) return 0;
     *pa = c->phys | (va & 0x3FFu);
+    g_sh4.jitSqTag = (va & ~0x3FFu) | (u32)md;
+    g_sh4.jitSqPa = c->phys;
     return 1;
 }
 
 static void tc_fill(TcEntry *c, const TlbEntry *e, u32 va, int md, u32 tag)
 {
     u32 m = page_mask(e->ptel), epr = (e->ptel >> 5) & 3, f = 0;
+    g_mmu_stats[9]++;
     if (e >= s_utlb && e < s_utlb + 64)
     {
         u32 i = (u32)(e - s_utlb), slot = (u32)(c - s_tc), k, n = s_tcCount[i];
@@ -312,6 +394,27 @@ static void tc_fill(TcEntry *c, const TlbEntry *e, u32 va, int md, u32 tag)
     c->ramDelta = (c->phys & 0x00FFFFFFu) - (va & ~0x3FFu);
 }
 
+static void lut_fill(u32 va, const TcEntry *c)
+{
+    u32 idx = va >> 12, pr = (c->ptel >> 5) & 3, delta, page, k, isNew;
+    if (!g_mmu_lut[0] || !g_mmu_lut[1] || (va >> 31) || !(c->flags & MMU_TC_RAM) || page_mask(c->ptel) < 0xFFFu || !(pr & 2)) return;
+    page = (c->phys - (va & 0xC00u)) & 0x00FFF000u;
+    delta = page - (va & 0xFFFFF000u);
+    isNew = g_mmu_lut[0][idx] == ~0u && g_mmu_lut[1][idx] == ~0u;
+    g_mmu_lut[0][idx] = delta;
+    if (pr == 3 && (c->ptel & PTEL_D))
+    {
+        for (k = 0; k < 4 && !sh4_jit_ram_has_code(page + k * 0x400u); k++) {}
+        if (k == 4) g_mmu_lut[1][idx] = delta;
+    }
+    if (isNew)
+    {
+        g_mmu_stats[11]++;
+        if (s_lutCount < LUT_TRACK) s_lutFilled[s_lutCount++] = idx;
+        else s_lutOverflow = 1;
+    }
+}
+
 int g_sh4_wince_tlb = 1;
 
 static const u16 s_wceTlbMiss[40] = {
@@ -325,6 +428,31 @@ static u32 s_wceVbr = 1;
 static u64 s_wceSlice, s_wceStep;
 static int s_wceHandler;
 
+u32 g_mmu_stats[16];
+static u32 s_seenKey[65536], s_seenVal[65536];
+
+static void note_mapping(u32 asid, u32 va, u32 entry)
+{
+    u32 key = (asid << 20) | (va >> 12), h = (key * 2654435761u) >> 16, i;
+    for (i = 0; i < 65536; i++)
+    {
+        u32 k = (h + i) & 65535;
+        if (s_seenKey[k] == key + 1)
+        {
+            g_mmu_stats[s_seenVal[k] == entry ? 5 : 6]++;
+            s_seenVal[k] = entry;
+            return;
+        }
+        if (!s_seenKey[k])
+        {
+            s_seenKey[k] = key + 1;
+            s_seenVal[k] = entry;
+            g_mmu_stats[7]++;
+            return;
+        }
+    }
+}
+
 static int kernel_word(u32 addr, u32 *v)
 {
     if ((addr >> 30) != 2 || (addr & 3)) return 0;
@@ -333,9 +461,9 @@ static int kernel_word(u32 addr, u32 *v)
     return 1;
 }
 
-static int wince_refill(u32 va, int write)
+static int wince_refill_ok(u32 va)
 {
-    u32 *bank, section, block, lock, mask, entry, k;
+    u32 k;
     if (!g_sh4_wince_tlb || (g_sh4.sr & (SR_BL | SR_RB)) || (va >> 31)) return 0;
     if (g_sh4.vbr != s_wceVbr)
     {
@@ -345,13 +473,33 @@ static int wince_refill(u32 va, int write)
         for (k = 0; k < 40 && s_wceHandler; k++)
             if (mem_read16(h + k * 2) != s_wceTlbMiss[k]) s_wceHandler = 0;
     }
-    if (!s_wceHandler) return 0;
+    return s_wceHandler && g_sh4.rbank[7] == 0xFF000000u;
+}
+
+static const TlbEntry *known_find(u32 va, TlbEntry *tmp)
+{
+    u32 k;
+    if (!s_knownCount || !wince_refill_ok(va)) return NULL;
+    k = known_slot(known_key(g_ccn.pteh & 0xFF, va));
+    if (k == ~0u || !s_knownKey[k]) return NULL;
+    tmp->pteh = (g_ccn.pteh & 0xFF) | (va & 0xFFFFF000u);
+    tmp->ptel = s_knownPtel[k];
+    tmp->ptea = s_knownPtea[k];
+    g_mmu_stats[10]++;
+    return tmp;
+}
+
+static int wince_refill(u32 va, int write)
+{
+    u32 *bank, section, block, lock, mask, entry;
+    if (!wince_refill_ok(va)) return 0;
     bank = g_sh4.rbank;
-    if (bank[7] != 0xFF000000u) return 0;
     if (!kernel_word(g_ccn.ttb + (va >> 25) * 4, &section)) return 0;
     if (!kernel_word(section + ((va >> 16) & 0x1FF) * 4, &block) || !(block >> 31)) return 0;
     if (!kernel_word(block, &lock) || !kernel_word(bank[4] + 20, &mask) || !(lock & mask)) return 0;
     if (!kernel_word(block + 12 + ((va >> 12) & 15) * 4, &entry) || !(entry & 1)) return 0;
+    g_mmu_stats[0]++;
+    note_mapping(g_ccn.pteh & 0xFF, va, entry);
     g_ccn.tea = va;
     g_ccn.pteh = (g_ccn.pteh & 0xFF) | (va & 0xFFFFFC00u);
     g_ccn.expevt = write ? EXC_TLB_MISS_WRITE : EXC_TLB_MISS_READ;
@@ -379,10 +527,13 @@ static u32 tlb_translate(u32 va, int access, int md)
     c = &s_tc[(va >> 10) & (TC_SIZE - 1)];
     if (c->tag != tag)
     {
+        TlbEntry tmp;
         const TlbEntry *e = utlb_search(va, md);
+        if (!e) e = known_find(va, &tmp);
         if (!e && wince_refill(va, write)) e = utlb_search(va, md);
         if (!e)
         {
+            g_mmu_stats[8]++;
             fault(va, write ? EXC_TLB_MISS_WRITE : EXC_TLB_MISS_READ, 0x400);
             return 0;
         }
@@ -399,6 +550,7 @@ static u32 tlb_translate(u32 va, int access, int md)
         if ((!md && !(pr & 2)) || (write && !(pr & 1))) fault(va, write ? EXC_PROT_WRITE : EXC_PROT_READ, 0x100);
         if (write && !(ptel & PTEL_D)) fault(va, EXC_INITIAL_WRITE, 0x100);
     }
+    lut_fill(va, c);
     phys = c->phys | (va & 0x3FFu);
     return phys;
 }
@@ -414,9 +566,15 @@ u32 sh4_mmu_peek(u32 va, int *ok)
         TcEntry *c = &s_tc[(va >> 10) & (TC_SIZE - 1)];
         if (c->tag == tag) return c->phys | (va & 0x3FFu);
         int k = utlb_find(va, md);
+        TlbEntry tmp;
         if (k >= 0)
         {
             tc_fill(c, &s_utlb[k], va, md, tag);
+            return c->phys | (va & 0x3FFu);
+        }
+        if (known_find(va, &tmp))
+        {
+            tc_fill(c, &tmp, va, md, tag);
             return c->phys | (va & 0x3FFu);
         }
     }
@@ -432,13 +590,30 @@ u32 sh4_mmu_peek(u32 va, int *ok)
 
 int sh4_mmu_fetch_refill(u32 va)
 {
+    TlbEntry tmp;
     if (!g_mmu_on || va >= 0x80000000u || utlb_find(va, (g_sh4.sr & SR_MD) != 0) >= 0) return 0;
+    if (known_find(va, &tmp)) return 1;
     return wince_refill(va, 0);
 }
 
 void sh4_mmu_code_changed(u32 off)
 {
     u32 i;
+    if (g_mmu_lut[1])
+    {
+        if (off == ~0u || s_lutOverflow)
+            for (i = 0; i < (s_lutOverflow ? LUT_PAGES : s_lutCount); i++)
+            {
+                u32 idx = s_lutOverflow ? i : s_lutFilled[i];
+                if (off == ~0u || ((((idx << 12) + g_mmu_lut[1][idx]) ^ off) & 0x00FFF000u) == 0) g_mmu_lut[1][idx] = ~0u;
+            }
+        else
+            for (i = 0; i < s_lutCount; i++)
+            {
+                u32 idx = s_lutFilled[i];
+                if (g_mmu_lut[1][idx] != ~0u && ((((idx << 12) + g_mmu_lut[1][idx]) ^ off) & 0x00FFF000u) == 0) g_mmu_lut[1][idx] = ~0u;
+            }
+    }
     for (i = 0; i < TC_SIZE; i++)
     {
         TcEntry *c = &s_tc[i];
@@ -448,12 +623,41 @@ void sh4_mmu_code_changed(u32 off)
     }
 }
 
+static int tlb_sq_only(void)
+{
+    u32 i;
+    for (i = 0; i < 64; i++)
+        if ((s_utlb[i].ptel & PTEL_V) && (s_utlb[i].pteh >> 26) != 0x38) return 0;
+    for (i = 0; i < 4; i++)
+        if ((s_itlb[i].ptel & PTEL_V) && (s_itlb[i].pteh >> 26) != 0x38) return 0;
+    return 1;
+}
+
+static void mmu_mode(void)
+{
+    int at = (g_ccn.mmucr & MMUCR_AT) != 0, sq = at && g_mmu_sq_only_ok && tlb_sq_only(), on = at && !sq;
+    if (sq != g_mmu_sq_only)
+    {
+        LOG_INFO("[sh4] MMU for the store queues only: %s", sq ? "yes" : "no");
+        g_mmu_sq_only = sq;
+        sh4_break_slice();
+    }
+    if (on != g_mmu_on)
+    {
+        LOG_INFO("[sh4] MMU %s (MMUCR %08X)", on ? "on" : "off", g_ccn.mmucr);
+        g_mmu_on = on;
+        sh4_break_slice();
+    }
+}
+
 void sh4_mmu_reset(void)
 {
+    sh4_mmu_lut_init();
     memset(s_utlb, 0, sizeof(s_utlb));
     memset(s_itlb, 0, sizeof(s_itlb));
     utlb_index_all();
     g_mmu_on = 0;
+    g_mmu_sq_only = 0;
     tc_flush();
 }
 
@@ -462,23 +666,25 @@ void sh4_mmu_write_mmucr(u32 value)
     u32 i;
     if (value & MMUCR_TI)
     {
+        g_mmu_stats[3]++;
         for (i = 0; i < 64; i++) s_utlb[i].ptel &= ~PTEL_V;
         for (i = 0; i < 4; i++) s_itlb[i].ptel &= ~PTEL_V;
         utlb_index_all();
     }
     g_ccn.mmucr = value & ~MMUCR_TI;
     g_sh4.jitSqKey = (g_ccn.mmucr & MMUCR_SQMD) ? ~0u : 0x38u;
-    if ((value & MMUCR_AT) != (u32)g_mmu_on)
-    {
-        LOG_INFO("[sh4] MMU %s (MMUCR %08X)", value & MMUCR_AT ? "on" : "off", value);
-        g_mmu_on = (int)(value & MMUCR_AT);
-        sh4_break_slice();
-    }
+    mmu_mode();
     tc_flush();
 }
 
 void sh4_mmu_write_pteh(u32 value)
 {
+    if ((value ^ g_ccn.pteh) & 0xFF)
+    {
+        g_mmu_stats[2]++;
+        lut_clear_all();
+        g_sh4.jitSqTag = ~0u;
+    }
     g_ccn.pteh = value;
     g_sh4.jitAsidTag = value << 24;
 }
@@ -486,12 +692,14 @@ void sh4_mmu_write_pteh(u32 value)
 static void tc_drop(u32 pteh, u32 ptel)
 {
     u32 m = page_mask(ptel), va = pteh & ~m & 0xFFFFFC00u, n = (m + 1) >> 10, i;
+    g_sh4.jitSqTag = ~0u;
     if (!(ptel & PTEL_V)) return;
     if (n >= TC_SIZE)
     {
         tc_flush();
         return;
     }
+    lut_clear_range(va, n);
     for (i = 0; i < n; i++, va += 0x400u)
     {
         TcEntry *c = &s_tc[(va >> 10) & (TC_SIZE - 1)];
@@ -520,6 +728,7 @@ static void tc_drop_entry(u32 i)
 {
     const TlbEntry *e = &s_utlb[i];
     u32 n = s_tcCount[i], k;
+    g_sh4.jitSqTag = ~0u;
     s_tcCount[i] = 0;
     if (n > TC_TRACK)
     {
@@ -532,9 +741,35 @@ static void tc_drop_entry(u32 i)
         for (k = 0; k < n; k++)
         {
             TcEntry *c = &s_tc[s_tcSlots[i][k]];
-            if (c->tag && ((((c->tag & 0xFFFFFFu) - 1) >> 1) - base) < pages) memset(c, 0, sizeof(*c));
+            if (c->tag && ((((c->tag & 0xFFFFFFu) - 1) >> 1) - base) < pages)
+            {
+                lut_clear_range((((c->tag & 0xFFFFFFu) - 1) >> 1) << 10, 1);
+                memset(c, 0, sizeof(*c));
+            }
         }
     }
+}
+
+static void known_note(const TlbEntry *e)
+{
+    u32 key, k;
+    if (!(e->ptel & PTEL_V) || page_mask(e->ptel) != 0xFFFu || (e->pteh >> 31)) return;
+    key = known_key(e->pteh & 0xFF, e->pteh);
+    k = known_slot(key);
+    if (k == ~0u) return;
+    if (s_knownKey[k] == key)
+    {
+        if (s_knownPtel[k] == e->ptel && s_knownPtea[k] == e->ptea) return;
+        tc_drop(e->pteh, e->ptel);
+    }
+    else
+    {
+        if (s_knownCount >= KNOWN_SLOTS * 3 / 4) return;
+        s_knownCount++;
+        s_knownKey[k] = key;
+    }
+    s_knownPtel[k] = e->ptel;
+    s_knownPtea[k] = e->ptea;
 }
 
 static void ldtlb_at(u64 now)
@@ -545,12 +780,15 @@ static void ldtlb_at(u64 now)
     s_urcAt = now;
     g_ccn.mmucr = (g_ccn.mmucr & ~(63u << 10)) | (urc << 10);
     e = &s_utlb[urc];
+    g_mmu_stats[1]++;
     tc_drop_entry(urc);
     e->pteh = g_ccn.pteh;
     e->ptel = g_ccn.ptel;
     e->ptea = g_ccn.ptea;
     utlb_index(urc);
     if (utlb_overlaps(urc)) tc_drop(e->pteh, e->ptel);
+    known_note(e);
+    if (g_mmu_sq_only && (e->ptel & PTEL_V) && (e->pteh >> 26) != 0x38) mmu_mode();
 }
 
 void sh4_mmu_ldtlb(void)
@@ -588,6 +826,7 @@ void sh4_mmu_array_write(u32 addr, u32 value)
     int utlb = (addr >> 24) >= 0xF6;
     TlbEntry *t = utlb ? s_utlb : s_itlb;
     TlbEntry *e = utlb ? &s_utlb[(addr >> 8) & 63] : &s_itlb[(addr >> 8) & 3];
+    g_mmu_stats[4]++;
     if (((addr >> 24) & 1) == 0)
     {
         if (addr & 0x80)
@@ -608,6 +847,7 @@ void sh4_mmu_array_write(u32 addr, u32 value)
         e->ptel = value & 0x1FFFFDFFu;
     utlb_index_all();
     tc_flush();
+    if (g_ccn.mmucr & MMUCR_AT) mmu_mode();
 }
 
 void sh4_mmu_state(StateIO *io)
@@ -618,6 +858,9 @@ void sh4_mmu_state(StateIO *io)
     STATE(io, g_mmu_on);
     if (io->loading)
     {
+        g_mmu_sq_only = 0;
+        g_mmu_on = 0;
+        mmu_mode();
         utlb_index_all();
         tc_flush();
     }

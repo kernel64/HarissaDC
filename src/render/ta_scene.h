@@ -58,6 +58,7 @@ struct TaScene
     u32 modVolCount, modVolCap;
     u32 bgColor;
     f32 bgDepth;
+    f32 zMax, zHuge;
 };
 
 int ta_strip_can_cover(const TaScene *sc, const TaStrip *s);

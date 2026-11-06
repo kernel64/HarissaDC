@@ -4,6 +4,8 @@
 #include "aica.h"
 #include "cdda.h"
 
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -157,6 +159,7 @@ struct AicaChan
 };
 
 static AicaChan s_ch[64];
+#define PHASE_FIRST 0x80000000u
 static s16 *s_out;
 #define OUT_FRAMES 16384u
 static volatile u32 s_outWrite, s_outRead;
@@ -175,20 +178,32 @@ static void build_gain_table(void)
     }
 }
 
-static u32 eg_step(u32 rate, int attack)
-{
-    double ms, samples;
-    if (rate == 0) return 0;
-    if (attack && rate >= 62) return 0x3FF << 16;
-    ms = (attack ? 8100.0 : 118200.0);
-    while (rate > 4) { ms *= 0.5; rate -= 4; }
-    ms *= 1.0 - (rate - 1) * 0.1591;
-    samples = ms * 44.1;
-    if (samples < 1.0) samples = 1.0;
-    return (u32)((double)(0x3FF << 16) / samples);
-}
+static const double s_attackMs[64] = {
+    -1, -1, 8100.0, 6900.0, 6000.0, 4800.0, 4000.0, 3400.0, 3000.0, 2400.0, 2000.0, 1700.0, 1500.0,
+    1200.0, 1000.0, 860.0, 760.0, 600.0, 500.0, 430.0, 380.0, 300.0, 250.0, 220.0, 190.0, 150.0, 130.0, 110.0, 95.0,
+    76.0, 63.0, 55.0, 47.0, 38.0, 31.0, 27.0, 24.0, 19.0, 15.0, 13.0, 12.0, 9.4, 7.9, 6.8, 6.0, 4.7, 3.8, 3.4, 3.0, 2.4,
+    2.0, 1.8, 1.6, 1.3, 1.1, 0.93, 0.85, 0.65, 0.53, 0.44, 0.40, 0.35, 0.0, 0.0 };
+static const double s_decayMs[64] = {
+    -1, -1, 118200.0, 101300.0, 88600.0, 70900.0, 59100.0, 50700.0, 44300.0, 35500.0, 29600.0, 25300.0, 22200.0, 17700.0,
+    14800.0, 12700.0, 11100.0, 8900.0, 7400.0, 6300.0, 5500.0, 4400.0, 3700.0, 3200.0, 2800.0, 2200.0, 1800.0, 1600.0, 1400.0, 1100.0,
+    920.0, 790.0, 690.0, 550.0, 460.0, 390.0, 340.0, 270.0, 230.0, 200.0, 170.0, 140.0, 110.0, 98.0, 85.0, 68.0, 57.0, 49.0, 43.0, 34.0,
+    28.0, 25.0, 22.0, 18.0, 14.0, 12.0, 11.0, 8.5, 7.1, 6.1, 5.4, 4.3, 3.6, 3.1 };
 
-static u32 s_egStep[64][2];
+static u32 s_egStep[64];
+static u32 s_egAttack[64];
+
+static void build_eg_tables(void)
+{
+    int r;
+    for (r = 0; r < 64; r++)
+    {
+        double d = s_decayMs[r], a = s_attackMs[r];
+        s_egStep[r] = d < 0 ? 0 : d == 0 ? (0x3FFu << 16) : (u32)((double)(0x3FF << 16) / (d * 44.1 < 1.0 ? 1.0 : d * 44.1));
+        if (a < 0) s_egAttack[r] = 0;
+        else if (a == 0 || a * 44.1 < 1.0) s_egAttack[r] = ~0u;
+        else s_egAttack[r] = (u32)((1.0 - pow(640.0, -1.0 / (a * 44.1))) * 4294967296.0);
+    }
+}
 
 static u32 effective_rate(int ch, u32 rate)
 {
@@ -196,10 +211,10 @@ static u32 effective_rate(int ch, u32 rate)
     if (rate == 0) return 0;
     if (krs != 15)
     {
-        s32 oct = (s32)((CH_REG(ch, 0x18) >> 11) & 15);
+        s32 oct = (s32)((CH_REG(ch, 0x18) >> 11) & 15), k;
         if (oct & 8) oct -= 16;
-        r += (u32)(s32)((s32)krs + oct) * 2 + ((CH_REG(ch, 0x18) >> 9) & 1);
-        if ((s32)r < 0) r = 0;
+        k = ((s32)krs + oct) * 2;
+        r += (k > 0 ? (u32)k : 0) + ((CH_REG(ch, 0x18) >> 9) & 1);
     }
     return r > 63 ? 63 : r;
 }
@@ -219,7 +234,7 @@ static void key_on(int ch)
     c->eg = EG_ATTACK;
     c->level = 0x3FF << 16;
     c->pos = 0;
-    c->phase = 0;
+    c->phase = PHASE_FIRST;
     update_addresses(ch);
     c->adpcmPrev = 0;
     c->adpcmStep = 0x7F;
@@ -234,8 +249,9 @@ static void update_addresses(int ch)
     u32 r0 = CH_REG(ch, 0x00), sa = ((r0 & 0x7F) << 16) | CH_REG(ch, 0x04);
     if (((r0 >> 7) & 3) == 0) sa &= ~1u;
     if (g_aica_trace && c->on && (sa != c->sa || CH_REG(ch, 0x08) != c->lsa || CH_REG(ch, 0x0C) != c->lea))
-        LOG_INFO("[aica] t %u ch %d while playing (pos %X): SA %06X>%06X LSA %X>%X LEA %X>%X", s_sampleNo, ch, c->pos, c->sa, sa,
-                 c->lsa, CH_REG(ch, 0x08), c->lea, CH_REG(ch, 0x0C));
+        LOG_INFO("[aica] t %u ch %d while playing (pos %X, eg %d level %X, TL %02X DISDL %X): SA %06X>%06X LSA %X>%X LEA %X>%X", s_sampleNo, ch,
+                 c->pos, c->eg, c->level >> 16, CH_REG(ch, 0x28) >> 8, (CH_REG(ch, 0x24) >> 8) & 15, c->sa, sa, c->lsa, CH_REG(ch, 0x08), c->lea,
+                 CH_REG(ch, 0x0C));
     c->fmt = (r0 >> 7) & 3;
     c->sa = sa;
     c->lsa = CH_REG(ch, 0x08);
@@ -244,6 +260,8 @@ static void update_addresses(int ch)
 
 static void key_off(int ch)
 {
+    if (g_aica_trace && s_ch[ch].on && s_ch[ch].eg != EG_RELEASE)
+        LOG_INFO("[aica] t %u key off ch %d (eg %d level %X, RR %u)", s_sampleNo, ch, s_ch[ch].eg, s_ch[ch].level >> 16, CH_REG(ch, 0x14) & 31);
     if (s_ch[ch].on && s_ch[ch].eg != EG_OFF) s_ch[ch].eg = EG_RELEASE;
 }
 
@@ -289,19 +307,21 @@ static s32 fetch(AicaChan *c)
 
 static void advance(int ch, AicaChan *c, u32 steps)
 {
+    u32 lea = c->fmt == 3 ? (c->lea + 3) & ~3u : c->lea;
     while (steps--)
     {
         c->pos++;
+        if (c->pos == c->lsa && c->eg == EG_ATTACK && ((CH_REG(ch, 0x14) >> 14) & 1)) c->eg = EG_DECAY1;
         if (c->fmt >= 2 && c->pos == c->lsa && !c->loopSaved)
         {
             c->loopPrev = c->adpcmPrev;
             c->loopStep = c->adpcmStep;
             c->loopSaved = 1;
         }
-        if (c->pos >= c->lea)
+        if (c->pos >= lea)
         {
             int stop = !((CH_REG(ch, 0x00) >> 9) & 1);
-            if (c->lsa > c->lea)
+            if (c->lsa > lea)
             {
                 if (c->pos < c->lsa) goto next;
                 stop = 1;
@@ -310,7 +330,7 @@ static void advance(int ch, AicaChan *c, u32 steps)
             if (!stop)
             {
                 c->pos = c->lsa;
-                if (c->fmt >= 2 && c->loopSaved)
+                if (c->fmt == 2 && c->loopSaved)
                 {
                     c->adpcmPrev = c->loopPrev;
                     c->adpcmStep = c->loopStep;
@@ -336,20 +356,22 @@ static void envelope(int ch, AicaChan *c)
     {
     case EG_ATTACK:
     {
-        u32 s = s_egStep[effective_rate(ch, r4 & 31)][1];
+        u32 f = s_egAttack[effective_rate(ch, r4 & 31)], s;
+        if (!f) break;
+        s = f == ~0u ? c->level : (u32)(((u64)c->level * f) >> 32) + 1;
         c->level = c->level > s ? c->level - s : 0;
-        if (!c->level) c->eg = EG_DECAY1;
+        if (!c->level && !((r5 >> 14) & 1)) c->eg = EG_DECAY1;
         break;
     }
     case EG_DECAY1:
-        c->level += s_egStep[effective_rate(ch, (r4 >> 6) & 31)][0];
+        c->level += s_egStep[effective_rate(ch, (r4 >> 6) & 31)];
         if (c->level >= dl) c->eg = EG_DECAY2;
         break;
     case EG_DECAY2:
-        c->level += s_egStep[effective_rate(ch, (r4 >> 11) & 31)][0];
+        c->level += s_egStep[effective_rate(ch, (r4 >> 11) & 31)];
         break;
     case EG_RELEASE:
-        c->level += s_egStep[effective_rate(ch, r5 & 31)][0];
+        c->level += s_egStep[effective_rate(ch, r5 & 31)];
         break;
     }
     if (c->level >= (0x3FFu << 16))
@@ -360,6 +382,32 @@ static void envelope(int ch, AicaChan *c)
 }
 
 static u32 level_att(u32 v15) { return v15 ? (15 - v15) * 32 : 1023; }
+
+void aica_debug_levels(char *out, int size)
+{
+    int n = _snprintf(out, size, "efsdl"), k;
+    for (k = 0; k < 16 && n > 0 && n < size; k++) n += _snprintf(out + n, size - n, " %X", (REG(0x2000 + k * 4) >> 8) & 15);
+    if (n > 0 && n < size)
+        n += _snprintf(out + n, size - n, " | cdda %X fad %u lvl %04X %04X mvol %X", cdda_status(), cdda_fad(), REG(0x2040) & 0xFFFF,
+                       REG(0x2044) & 0xFFFF, REG(R_MVOL) & 15);
+    if (n > 0 && n < size) n += _snprintf(out + n, size - n, " | ch");
+    for (k = 0; k < 64 && n > 0 && n < size; k++)
+    {
+        u32 dis = (CH_REG(k, 0x24) >> 8) & 15, imx = (CH_REG(k, 0x20) >> 4) & 15;
+        if (!s_ch[k].on) continue;
+        n += _snprintf(out + n, size - n, " %d:%X/%X/%02X/%X f%u%s", k, dis, imx, CH_REG(k, 0x28) >> 8, s_ch[k].level >> 16, s_ch[k].fmt,
+                       !dis && imx ? "*" : "");
+        if (s_ch[k].fmt == 3 && n > 0 && n < size)
+            n += _snprintf(out + n, size - n, "[sa %06X lsa %X lea %X pos %X step %X]", s_ch[k].sa, s_ch[k].lsa, s_ch[k].lea, s_ch[k].pos,
+                           CH_REG(k, 0x18));
+    }
+    out[size - 1] = 0;
+}
+
+int g_aica_measure;
+u32 g_aica_rms[16], g_aica_rms_count;
+static u64 s_rmsSum;
+static u32 s_rmsN;
 
 static void mix_sample(void)
 {
@@ -376,7 +424,11 @@ static void mix_sample(void)
         oct = (s32)((r6 >> 11) & 15);
         if (oct & 8) oct -= 16;
         step = oct >= 0 ? (1024 + (r6 & 0x7FF)) << oct : (1024 + (r6 & 0x7FF)) >> -oct;
-        if (c->pos == 0 && c->phase == 0) c->cur = fetch(c);
+        if (c->phase & PHASE_FIRST)
+        {
+            c->phase &= ~PHASE_FIRST;
+            c->cur = fetch(c);
+        }
         envelope(ch, c);
         if (!c->on) continue;
         disdl = (CH_REG(ch, 0x24) >> 8) & 15;
@@ -428,6 +480,17 @@ static void mix_sample(void)
     if (left < -32768) left = -32768;
     if (right > 32767) right = 32767;
     if (right < -32768) right = -32768;
+    if (g_aica_measure)
+    {
+        s_rmsSum += (u64)((s64)left * left) + (u64)((s64)right * right);
+        if (++s_rmsN == 4410)
+        {
+            g_aica_rms[g_aica_rms_count & 15] = (u32)sqrt((double)s_rmsSum / (2.0 * 4410.0));
+            g_aica_rms_count++;
+            s_rmsSum = 0;
+            s_rmsN = 0;
+        }
+    }
     if (s_out && s_outWrite - s_outRead < OUT_FRAMES)
     {
         u32 i = (s_outWrite % OUT_FRAMES) * 2;
@@ -503,11 +566,8 @@ void aica_init(void)
     s_evSample = sched_register("aica_sample", sample_event, NULL);
     if (!s_out) s_out = (s16 *)calloc(OUT_FRAMES * 2, sizeof(s16));
     build_gain_table();
-    for (r = 0; r < 64; r++)
-    {
-        s_egStep[r][0] = eg_step(r, 0);
-        s_egStep[r][1] = eg_step(r, 1);
-    }
+    build_eg_tables();
+    (void)r;
 }
 
 void aica_reset(void)
