@@ -68,7 +68,9 @@ float UiFooterWidth(const char *hints);
 void UiScreenFooter(const char *hints);
 
 void UiToast(const char *text, float age, float life);
+void UiToastBadge(const char *text, IDirect3DTexture9 *badge, float age, float life);
 void UiFpsBadge(const char *text);
+void UiPerfPanel(const char *text);
 
 struct UiInput
 {

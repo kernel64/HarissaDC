@@ -282,6 +282,7 @@ void holly_state(StateIO *io)
     STATE(io, s_istnrm);
     STATE(io, s_istext);
     STATE(io, s_isterr);
+    if (io->loading) update_irqs();
 }
 
 void holly_late_init(void)

@@ -19,6 +19,7 @@ void config_defaults(Config *c)
     c->showLog = 1;
     c->toneHz = 0;
     c->biosMode = BIOS_HLE;
+    c->cheatOn = -1;
     c->useJit = 1;
     c->gpuRender = 1;
     c->soundThread = 1;
@@ -55,10 +56,13 @@ void config_defaults(Config *c)
     c->smooth = 1;
 }
 
-static const char *const s_padSrcKey[PADSRC_COUNT] = { "none", "a", "b", "x", "y", "lb", "rb", "lt", "rt", "start", "ls", "rs", "dup", "ddown", "dleft", "dright" };
+static const char *const s_padSrcKey[PADSRC_COUNT] = { "none", "a", "b", "x", "y", "lb", "rb", "lt", "rt", "start", "ls", "rs", "dup", "ddown", "dleft", "dright",
+                                                       "lsup", "lsdown", "lsleft", "lsright", "rsup", "rsdown", "rsleft", "rsright" };
 static const char *const s_padSrcName[PADSRC_COUNT] = { "None", "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "START",
                                                         "Left stick click", "Right stick click", "D-pad up", "D-pad down",
-                                                        "D-pad left", "D-pad right" };
+                                                        "D-pad left", "D-pad right", "Left stick up", "Left stick down",
+                                                        "Left stick left", "Left stick right", "Right stick up", "Right stick down",
+                                                        "Right stick left", "Right stick right" };
 static const char *const s_padInKey[PADIN_COUNT] = { "map_a", "map_b", "map_x", "map_y", "map_start", "map_l", "map_r", "map_up", "map_down", "map_left", "map_right" };
 static const char *const s_padInName[PADIN_COUNT] = { "A", "B", "X", "Y", "Start", "L trigger", "R trigger", "D-pad up", "D-pad down", "D-pad left", "D-pad right" };
 
@@ -79,7 +83,48 @@ void config_pad_defaults(u32 map[PADIN_COUNT], int *stick)
     map[PADIN_DOWN] = 1u << PADSRC_DDOWN;
     map[PADIN_LEFT] = 1u << PADSRC_DLEFT;
     map[PADIN_RIGHT] = 1u << PADSRC_DRIGHT;
-    *stick = 0;
+    *stick = PAD_STICK_LEFT;
+}
+
+u32 config_stick_dirs(int x, int y)
+{
+    const s64 t = 13107;
+    s64 ax = x < 0 ? -(s64)x : x, ay = y < 0 ? -(s64)y : y;
+    u32 d = 0;
+    if (ax * ax + ay * ay <= t * t) return 0;
+    if (ay * 10000 > ax * 4142) d |= y > 0 ? 1u : 2u;
+    if (ax * 10000 > ay * 4142) d |= x < 0 ? 4u : 8u;
+    return d;
+}
+
+static const int s_dpadIn[4] = { PADIN_UP, PADIN_DOWN, PADIN_LEFT, PADIN_RIGHT };
+static const u32 s_stickDirs = 0xFFu << PADSRC_LSUP;
+
+int config_pad_stick_dpad(const u32 map[PADIN_COUNT])
+{
+    int stick, k;
+    u32 any = 0;
+    for (k = 0; k < 4; k++) any |= map[s_dpadIn[k]] & s_stickDirs;
+    if (!any) return -1;
+    for (stick = PAD_STICK_LEFT; stick <= PAD_STICK_RIGHT; stick++)
+    {
+        int first = stick == PAD_STICK_LEFT ? PADSRC_LSUP : PADSRC_RSUP;
+        for (k = 0; k < 4; k++)
+            if ((map[s_dpadIn[k]] & s_stickDirs) != 1u << (first + k)) break;
+        if (k == 4) return stick;
+    }
+    return -2;
+}
+
+void config_pad_set_stick_dpad(u32 map[PADIN_COUNT], int stick)
+{
+    int k;
+    for (k = 0; k < 4; k++)
+    {
+        map[s_dpadIn[k]] &= ~s_stickDirs;
+        if (stick == PAD_STICK_LEFT || stick == PAD_STICK_RIGHT)
+            map[s_dpadIn[k]] |= 1u << ((stick == PAD_STICK_LEFT ? PADSRC_LSUP : PADSRC_RSUP) + k);
+    }
 }
 
 static u32 pad_sources(const char *v)
@@ -109,7 +154,7 @@ static int pad_key(Config *c, const char *key, const char *value)
     }
     if (ini_key_is(key, "stick"))
     {
-        c->padStick[p] = ini_key_is(value, "right") ? 1 : 0;
+        c->padStick[p] = ini_key_is(value, "right") ? PAD_STICK_RIGHT : ini_key_is(value, "none") ? PAD_STICK_NONE : PAD_STICK_LEFT;
         return 1;
     }
     if (ini_key_is(key, "deadzone"))
@@ -176,6 +221,7 @@ static int on_key(void *user, const char *section, const char *key, const char *
     else if (ini_key_is(key, "gunhpos")) c->gunHpos = ini_int(value, c->gunHpos);
     else if (ini_key_is(key, "mmusq")) c->mmuSq = ini_key_is(value, "on") ? 1 : ini_key_is(value, "off") ? 2 : 0;
     else if (ini_key_is(key, "renderwait")) c->renderWait = ini_key_is(value, "late") ? 1 : ini_key_is(value, "wait") ? 2 : 0;
+    else if (ini_key_is(key, "fbreadback")) c->fbReadback = ini_key_is(value, "on") ? 1 : ini_key_is(value, "off") ? 2 : 0;
     else if (ini_key_is(key, "cable")) c->cable = ini_key_is(value, "vga") ? 1 : ini_key_is(value, "rgb") ? 2 : 0;
     else if (ini_key_is(key, "taskip")) c->taSkip = ini_bool(value, c->taSkip);
     else if (ini_key_is(key, "audioms")) c->audioMs = ini_int(value, c->audioMs);
@@ -215,6 +261,7 @@ static int on_key(void *user, const char *section, const char *key, const char *
     else if (ini_key_is(key, "transsort")) c->transSort = ini_bool(value, c->transSort);
     else if (ini_key_is(key, "modvols")) c->modVols = ini_bool(value, c->modVols);
     else if (ini_key_is(key, "countdown")) c->countdown = ini_key_is(value, "on") || ini_key_is(value, "1") ? 1 : ini_key_is(value, "off") || ini_key_is(value, "0") ? 2 : 0;
+    else if (ini_key_is(key, "palshader")) c->palShader = ini_key_is(value, "on") ? 1 : ini_key_is(value, "off") ? 2 : 0;
     else if (ini_key_is(key, "exactdepth")) c->exactDepth = ini_key_is(value, "on") || ini_key_is(value, "1") ? 1 : ini_key_is(value, "off") || ini_key_is(value, "0") ? 2 : 0;
     else if (ini_key_is(key, "hugedepth")) c->hugeDepth = ini_bool(value, c->hugeDepth);
     else if (ini_key_is(key, "transdepth")) c->transDepth = ini_bool(value, c->transDepth);
@@ -235,10 +282,14 @@ static int on_key(void *user, const char *section, const char *key, const char *
     else if (ini_key_is(key, "gpudisplay")) c->gpuDisplay = ini_int(value, c->gpuDisplay) != 0;
     else if (ini_key_is(key, "showfps")) c->showFps = ini_int(value, c->showFps) & 3;
     else if (ini_key_is(key, "vsync")) c->vsync = ini_int(value, c->vsync) % 3;
+    else if (ini_key_is(key, "wavdump")) c->wavDump = ini_int(value, c->wavDump);
+    else if (ini_key_is(key, "wavdumpat")) c->wavDumpAt = ini_int(value, c->wavDumpAt);
     else if (ini_key_is(key, "texfilter")) c->texFilter = ini_int(value, c->texFilter) % 3;
+    else if (ini_key_is(key, "resolution")) c->renderScale = ini_key_is(value, "1x") || ini_key_is(value, "1") ? 1 : 0;
     else if (ini_key_is(key, "artall")) c->artAll = ini_int(value, c->artAll);
     else if (ini_key_is(key, "updatecheck")) c->updateCheck = ini_int(value, c->updateCheck);
     else if (ini_key_is(key, "rumble")) c->rumble = ini_bool(value, c->rumble);
+    else if (ini_key_is(key, "vmu")) c->vmuShared = ini_key_is(value, "shared");
     else if (ini_key_is(key, "lightgun")) c->lightGun = ini_bool(value, c->lightGun);
     else if (ini_key_is(key, "rotate")) c->rotate = ini_key_is(value, "auto") ? -1 : ini_int(value, c->rotate);
     else if (ini_key_is(key, "artdownload")) c->artDownload = ini_int(value, c->artDownload);
@@ -248,6 +299,19 @@ static int on_key(void *user, const char *section, const char *key, const char *
     else if (ini_key_is(key, "lastgame")) copy_path(c->lastGame, value);
     else if (ini_key_is(key, "autoboot")) c->autoBoot = ini_bool(value, c->autoBoot);
     else if (ini_key_is(key, "disc")) copy_path(c->disc, value);
+    else if (ini_key_is(key, "rendertest")) copy_path(c->renderTest, value);
+    else if (ini_key_is(key, "cheats"))
+    {
+        strncpy(c->cheats, value, sizeof(c->cheats) - 1);
+        c->cheats[sizeof(c->cheats) - 1] = 0;
+    }
+    else if (ini_key_is(key, "cheaton")) c->cheatOn = ini_int(value, -1);
+    else if (ini_key_is(key, "jittrail")) c->jitTrail = ini_bool(value, 0);
+    else if (ini_key_is(key, "achievements")) c->achievements = ini_bool(value, c->achievements);
+    else if (ini_key_is(key, "ratest")) c->raTest = ini_int(value, 0);
+    else if (ini_key_is(key, "ratoast")) c->raToast = ini_int(value, 0);
+    else if (ini_key_is(key, "achat")) c->achAt = ini_int(value, 0);
+    else if (ini_key_is(key, "nonet")) c->noNet = ini_int(value, 0);
     else if (ini_key_is(key, "dumpblocks")) copy_path(c->dumpBlocks, value);
     else if (ini_key_is(key, "dumpblocksat")) c->dumpBlocksAt = ini_int(value, c->dumpBlocksAt);
     else if (ini_key_is(key, "jitmap")) c->jitMap = ini_int(value, c->jitMap);
@@ -303,7 +367,7 @@ int config_write(const Config *c, int withLastGame, char *out, int size)
                 if (r > 0 && n + r < size) n += r;
             }
             r = _snprintf(out + n, size - n, "%sstick=%s\r\n%sdeadzone=%d\r\n%ssensitivity=%d\r\n%sinvert=%d\r\n", prefix,
-                          c->padStick[p] ? "right" : "left", prefix, c->padDead[p], prefix, c->padRange[p], prefix, c->padInvert[p]);
+                          c->padStick[p] == PAD_STICK_RIGHT ? "right" : c->padStick[p] == PAD_STICK_NONE ? "none" : "left", prefix, c->padDead[p], prefix, c->padRange[p], prefix, c->padInvert[p]);
             if (r > 0 && n + r < size) n += r;
         }
         {
@@ -311,13 +375,23 @@ int config_write(const Config *c, int withLastGame, char *out, int size)
             int r;
             if (c->rotate == 0 || c->rotate == 90 || c->rotate == 270) _snprintf(rot, sizeof(rot), "%d", c->rotate);
             else strcpy(rot, "auto");
-            r = _snprintf(out + n, size - n, "rumble=%d\r\nvsync=%d\r\ntexfilter=%d\r\nrotate=%s\r\n", c->rumble, c->vsync, c->texFilter, rot);
+            r = _snprintf(out + n, size - n, "rumble=%d\r\nvsync=%d\r\ntexfilter=%d\r\nresolution=%s\r\nrotate=%s\r\n", c->rumble, c->vsync, c->texFilter,
+                          c->renderScale == 1 ? "1x" : "1.5x", rot);
+            if (r > 0 && n + r < size) n += r;
+            r = _snprintf(out + n, size - n, "bios=%s\r\naudioms=%d\r\nvmu=%s\r\n",
+                          c->biosMode == BIOS_REAL ? "real" : c->biosMode == BIOS_AUTO ? "auto" : "hle", c->audioMs,
+                          c->vmuShared ? "shared" : "game");
             if (r > 0 && n + r < size) n += r;
         }
     }
+    if (!withLastGame && c->cheats[0])
+    {
+        int r = _snprintf(out + n, size - n, "cheats=%s\r\n", c->cheats);
+        if (r > 0 && n + r < size) n += r;
+    }
     if (withLastGame)
     {
-        int r = _snprintf(out + n, size - n, "artdownload=%d\r\n", c->artDownload);
+        int r = _snprintf(out + n, size - n, "artdownload=%d\r\nachievements=%d\r\n", c->artDownload, c->achievements);
         if (r > 0 && n + r < size) n += r;
     }
     if (withLastGame && c->lang[0])

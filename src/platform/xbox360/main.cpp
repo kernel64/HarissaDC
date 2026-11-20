@@ -11,6 +11,7 @@
 #include "../../core/types.h"
 #include "../../core/version.h"
 #include "../../sh4/sh4_jit.h"
+#include "xb_ach.h"
 #include "xb_audio.h"
 #include "xb_codemem.h"
 #include "xb_diag.h"
@@ -19,7 +20,9 @@
 #include "xb_log.h"
 #include "xb_lang.h"
 #include "xb_menu.h"
+#include "xb_net.h"
 #include "xb_pad.h"
+#include "xb_ra.h"
 #include "xb_ui.h"
 
 static void load_settings(Config *c)
@@ -76,13 +79,19 @@ int __cdecl main()
     int quit = 0;
     char path[CONFIG_PATH_MAX];
 
-    xb_fs_set_data_drive(xb_log_open());
+    const char *drive = xb_log_open();
+    xb_fs_set_data_drive(drive);
+    XbAchInit(strcmp(drive, "cache") != 0);
     LOG_INFO("[main] %s %s (Xbox 360), %s-endian, %d-bit pointers", EMU_NAME, EMU_VERSION,
              EMU_HOST_BIG_ENDIAN ? "big" : "little", (int)(sizeof(void *) * 8));
     load_settings(&cfg);
     if (cfg.xinput[0]) XbPadScript(cfg.xinput);
 
     if (cfg.mountDrives) xb_fs_mount_drives();
+    NetTestOff(cfg.noNet);
+    XbRaInit(cfg.achievements, UiNotify);
+    XbRaSetOnUnlock(XbAchCheckRa);
+    if (cfg.raTest) XbRaSelfTest();
 
     d3d = Direct3DCreate9(D3D_SDK_VERSION);
     ZeroMemory(&pp, sizeof(pp));
@@ -106,7 +115,7 @@ int __cdecl main()
 
     if (cfg.diag > 0) diag_screen(dev, cfg.diag);
 
-    if (cfg.autoBoot)
+    if (!quit && cfg.autoBoot)
     {
         int r = xb_emu_run(dev, &cfg, cfg.disc);
         quit = r == XB_EMU_QUIT || cfg.exitAfter > 0;

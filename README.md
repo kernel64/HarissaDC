@@ -38,6 +38,7 @@ On the first start, choose your language. The game list then shows your games.
 | `.cue` + `.bin` | Redump dumps (GD-ROM layout with `REM HIGH-DENSITY AREA`). |
 | `.chd` | CHD version 5 (`chdman createcd`). Older CHDs: convert with `chdman copy`. |
 | `.iso` | A data track only. |
+| `.cdi` | DiscJuggler images. |
 | `.7z`, `.zip` | One game per archive; extracted once into `cache\` on the first start. |
 
 ### Games on several discs
@@ -72,7 +73,9 @@ next letter, B add or remove a favourite (favourites are listed first), BACK qui
 Up to 4 controllers are supported (Dreamcast ports A to D). Every Dreamcast button,
 the D-pad included, can be remapped per player in **Settings > Controls**: select a
 button, press A, then press the Xbox input you want. The same page sets, per player,
-which stick is the analog stick, its dead zone, sensitivity and inverted axes. Vibration
+which stick is the analog stick, its dead zone, sensitivity and inverted axes. A stick's
+directions can also be given to any button, and **Stick as D-pad** plays the games made for
+the D-pad (Dino Crisis...) with a stick. Vibration
 (the Dreamcast vibration pack) is on by default and can be turned off there too.
 
 **Light gun**: Ranger Mission, Sports Shooting USA, SEGA Clay Challenge and Extreme
@@ -82,16 +85,47 @@ the screen (reload), START is the gun's Start. For other shooting games, add
 
 ## Settings
 
-- **Graphics**: presets (Original, Enhanced, Smooth, CRT); aspect ratio **4:3**, **16:9**
-  (the 3D is drawn wider, more of the scene on the sides) or **16:9 stretched**; size and
-  position of the picture, brightness, V-Sync (off / on / strict), texture filter (as the
-  game, nearest, bilinear), smoothing, FXAA, sharpening, blur, scanlines, CRT and LCD
-  effects. 16:9 and the texture filter need the GPU renderer.
-- **CPU / Renderer**: take effect at the next start of a game.
-- **Show FPS**: off, frame rate, + CPU load and memory, + resolution.
+The settings are sorted into pages, from the game list (Y) and from the in-game menu:
+
+- **Picture**: aspect ratio **4:3**, **16:9** (the 3D is drawn wider, more of the scene on
+  the sides) or **16:9 stretched**, orientation, brightness, size and position of the
+  picture, internal resolution (1.5x or 1x).
+- **Effects**: presets (Original, Enhanced, Smooth, CRT), texture filter (as the game,
+  nearest, bilinear), smoothing, FXAA, sharpening, blur, scanlines, CRT and LCD effects.
+  16:9 and the texture filter need the GPU renderer.
+- **Controls**: see above.
+- **Interface**: language, FPS display (off, frame rate, a panel with speed, CPU, RAM and
+  resolution), box art downloads.
+- **Achievements**: RetroAchievements (see below).
+- **Advanced**: CPU, renderer, BIOS (built-in, Sega's, or Sega's when present), V-Sync,
+  audio margin, memory card (one per game, or one shared). CPU, renderer and BIOS take
+  effect at the next start of a game. Sega's BIOS is optional: copy your own
+  (`dc_boot.bin` and `dc_flash.bin`) to the `HarissaDC\bios` folder, and games start with
+  the Dreamcast's boot animation, as on the real console.
 - The console region (Japan, USA, Europe) is chosen from each disc, nothing to set.
 - Settings are kept with **Save for all games** (or **Save for this game only** from the
   in-game menu).
+
+## Cheats
+
+The in-game menu's **Cheats** page lists the codes known for the game (the Dreamcast
+cheat database of libretro, in `cheats\dreamcast_cheats.txt`): A turns one on or off. Your
+own codes go in the `cheats` folder, in a file named after the game, as a RetroArch `.cht`
+file or a `.txt` list of codes.
+
+## Achievements
+
+- **RetroAchievements**: turn it on in **Settings > Achievements** and sign in with your
+  retroachievements.org account (typed with the Xbox keyboard; only a login token is kept).
+  Achievements unlock as you play (softcore), with a notification; the in-game menu lists
+  the game's achievements, unlocked ones first. They pause while a cheat is on, until the
+  game restarts.
+- **Xbox 360 achievements**: HarissaDC has its own (23, 1000 G), earned with your
+  RetroAchievements progress (first unlock, number of unlocks, points, games completed...).
+
+> **Warning**: these achievements are written to your Xbox profile. Achievements from a
+> homebrew title on a profile that is used online can get the account banned. If your
+> profile goes online, do not use it with HarissaDC: use an offline profile.
 
 ## Box art
 
@@ -104,8 +138,9 @@ The emulator also checks GitHub for a newer release when the list opens.
 
 | Folder / file | Contents |
 |---|---|
-| `config\` | Settings (all games, and per game) |
-| `saves\` | Save states and the virtual memory card (VMU) |
+| `config\` | Settings (all games, and per game), RetroAchievements login token |
+| `saves\` | Save states, and the memory cards (VMU) in `saves\vmu\` (one per game) |
+| `cheats\` | The cheat database, and your own cheat files |
 | `art\` | Box art cache |
 | `cache\` | Games extracted from `.7z` archives |
 | `harissadc.log` | Log of the last session (attach it to bug reports) |
@@ -117,7 +152,7 @@ The emulator also checks GitHub for a newer release when the list opens.
 ## Known issues
 
 - Windows CE games (their discs show "Powered by Windows CE": Sega Rally 2,
-  Resident Evil 2, Virtua Cop 2...) start but run far too slowly to be played yet.
+  Resident Evil 2, Virtua Cop 2...) are still slow in places.
 - Some games have graphical glitches (wrong colours, things drawn in front of or
   behind others), for example in some menus of Daytona USA 2001.
 - Some cutscenes and videos run slowly (for example in Jet Grind Radio) while the

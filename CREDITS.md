@@ -27,6 +27,15 @@ Code from other projects:
 - **Box art**: the Redump list of Dreamcast discs from libretro-database
   (https://github.com/libretro/libretro-database) and pictures from libretro-thumbnails
   (https://thumbnails.libretro.com), downloaded by the console, never included.
+- **rcheevos 12.5** (RetroAchievements' runtime and client) — RetroAchievements, MIT license
+  (`src/third_party/rcheevos/LICENSE`), https://github.com/RetroAchievements/rcheevos. The copy
+  comes from Harissa64's: `md5.c` renamed `rc_md5.c`, `xbox/` for the Xbox 360 SDK (a `windows.h`
+  that includes `xtl.h`, `snprintf`), and memory values read in little-endian order on big-endian
+  hosts (`rc_memref.c`). The disc hash (`src/hw/ra_dc.cpp`) follows its `rc_hash_dreamcast`.
+- **Cheats**: libretro-database's Dreamcast cheat files (https://github.com/libretro/libretro-database,
+  CC BY-SA 4.0), converted to `third_party/libretro-cheats/dreamcast_cheats.txt` by
+  `tools/build_cheats.py`. The cheat formats (RetroArch's .cht entries, the Dreamcast code types)
+  were studied from RetroArch's cheat manager and Flycast's cheat list (studied, not copied).
 - **Inter** (interface font, as an atlas) — The Inter Project Authors, SIL Open Font License 1.1
   (`third_party/inter/OFL.txt`).
 - **Noto Sans Arabic** (Arabic glyphs of the atlas) — The Noto Project Authors, SIL Open Font

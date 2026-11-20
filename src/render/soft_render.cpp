@@ -4,6 +4,7 @@
 #include "soft_render.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,7 +32,11 @@ struct TexEntry
 };
 
 #define TEX_MAX 1024
+#if defined(_XBOX)
 #define TEX_POOL (24u << 20)
+#else
+#define TEX_POOL (256u << 20)
+#endif
 static TexEntry s_tex[TEX_MAX];
 static u32 s_texCount;
 static u32 *s_texPool;
@@ -72,6 +77,7 @@ struct DrawState
     u32 isp, tsp, list;
     const TexEntry *tex;
     int depthMode, zWrite, gouraud, offset, useAlpha, ignoreTexAlpha, shading, shadow, fog;
+    int bump;
     int clampU, clampV, flipU, flipV;
     u32 srcInstr, dstInstr;
     u32 ptRef;
@@ -181,8 +187,18 @@ static u32 shade(const DrawState *st, u32 base, u32 offs, f32 u, f32 v, f32 invW
     if (st->fog == 3) base = (fog_lut(invW) << 24) | s_fogColRam;
     c = shade_nofog(st, base, offs, u, v);
     if (st->fog == 0) c = fog_mix(c, s_fogColRam, fog_lut(invW));
-    else if (st->fog == 1 && st->offset) c = fog_mix(c, s_fogColVert, offs >> 24);
+    else if (st->fog == 1 && st->offset && !st->bump) c = fog_mix(c, s_fogColVert, offs >> 24);
     return c;
+}
+
+static u32 bump_alpha(u32 texel, u32 offs)
+{
+    f32 s = 1.57079633f * (f32)(texel >> 24) / 255.0f, r = 6.28318531f * (f32)((texel >> 16) & 255) / 255.0f;
+    f32 k1 = (f32)(offs >> 24) / 255.0f, k2 = (f32)((offs >> 16) & 255) / 255.0f, k3 = (f32)((offs >> 8) & 255) / 255.0f;
+    f32 q = 6.28318531f * (f32)(offs & 255) / 255.0f, i = k1 + k2 * sinf(s) + k3 * cosf(s) * cosf(r - q);
+    if (i < 0.0f) i = 0.0f;
+    if (i > 1.0f) i = 1.0f;
+    return (u32)(i * 255.0f + 0.5f);
 }
 
 static u32 shade_nofog(const DrawState *st, u32 base, u32 offs, f32 u, f32 v)
@@ -192,7 +208,8 @@ static u32 shade_nofog(const DrawState *st, u32 base, u32 offs, f32 u, f32 v)
     if (st->tex)
     {
         u32 t = sample(st, u, v), ta, ba = c >> 24;
-        if (st->ignoreTexAlpha) t |= 0xFF000000u;
+        if (st->bump) t = (bump_alpha(t, offs) << 24) | 0x00FFFFFFu;
+        else if (st->ignoreTexAlpha) t |= 0xFF000000u;
         ta = t >> 24;
         switch (st->shading)
         {
@@ -212,7 +229,7 @@ static u32 shade_nofog(const DrawState *st, u32 base, u32 offs, f32 u, f32 v)
                 (mul8((t >> 8) & 255, (c >> 8) & 255) << 8) | mul8(t & 255, c & 255);
             break;
         }
-        if (st->offset)
+        if (st->offset && !st->bump)
         {
             u32 r = ((c >> 16) & 255) + ((offs >> 16) & 255), g = ((c >> 8) & 255) + ((offs >> 8) & 255), b = (c & 255) + (offs & 255);
             c = (c & 0xFF000000u) | ((r > 255 ? 255 : r) << 16) | ((g > 255 ? 255 : g) << 8) | (b > 255 ? 255 : b);
@@ -234,14 +251,77 @@ static u32 lerp_color(u32 c0, u32 c1, u32 c2, f32 l0, f32 l1, f32 l2)
     return out;
 }
 
+struct DepthPlane
+{
+    f64 z0, x0, y0, dzdx, dzdy;
+};
+
+static void depth_plane(DepthPlane *p, f32 ax, f32 ay, f32 az, f32 bx, f32 by, f32 bz, f32 cx, f32 cy, f32 cz)
+{
+    f64 e1x = (f64)bx - ax, e1y = (f64)by - ay, e2x = (f64)cx - ax, e2y = (f64)cy - ay;
+    f64 d1 = (f64)bz - az, d2 = (f64)cz - az, det = e1x * e2y - e1y * e2x;
+    p->z0 = az;
+    p->x0 = ax;
+    p->y0 = ay;
+    p->dzdx = det != 0 ? (d1 * e2y - e1y * d2) / det : 0;
+    p->dzdy = det != 0 ? (e1x * d2 - d1 * e2x) / det : 0;
+}
+
+static EMU_INLINE f32 depth_at(const DepthPlane *p, f32 px, f32 py)
+{
+    return (f32)(p->z0 + p->dzdx * ((f64)px - p->x0) + p->dzdy * ((f64)py - p->y0));
+}
+
+struct EdgeSet
+{
+    f64 x[3], y[3];
+    f64 sign;
+    f64 invArea;
+    int topLeft[3];
+};
+
+static void edges_setup(EdgeSet *e, f32 ax, f32 ay, f32 bx, f32 by, f32 cx, f32 cy, f64 area)
+{
+    int i;
+    e->x[0] = ax; e->y[0] = ay;
+    e->x[1] = bx; e->y[1] = by;
+    e->x[2] = cx; e->y[2] = cy;
+    e->sign = area > 0 ? 1.0 : -1.0;
+    e->invArea = 1.0 / (area > 0 ? area : -area);
+    for (i = 0; i < 3; i++)
+    {
+        int u = (i + 1) % 3, v = (i + 2) % 3;
+        f64 dx = (e->x[v] - e->x[u]) * e->sign, dy = (e->y[v] - e->y[u]) * e->sign;
+        e->topLeft[i] = dy < 0 || (dy == 0 && dx > 0);
+    }
+}
+
+static EMU_INLINE int edges_cover(const EdgeSet *e, f64 px, f64 py, f32 *l)
+{
+    int i;
+    for (i = 0; i < 3; i++)
+    {
+        int u = (i + 1) % 3, v = (i + 2) % 3;
+        f64 f = ((e->x[v] - e->x[u]) * (py - e->y[u]) - (e->y[v] - e->y[u]) * (px - e->x[u])) * e->sign;
+        if (f < 0 || (f == 0 && !e->topLeft[i])) return 0;
+        l[i] = (f32)(f * e->invArea);
+    }
+    return 1;
+}
+
 static void draw_triangle(const DrawState *st, const TaVertex *a, const TaVertex *b, const TaVertex *c, int w, int h)
 {
     f32 area = (b->x - a->x) * (c->y - a->y) - (c->x - a->x) * (b->y - a->y), inv;
     s32 minX, maxX, minY, maxY, x, y;
     int cull = (st->isp >> 27) & 3;
-    if (area == 0) return;
+    DepthPlane plane;
+    EdgeSet edges;
+    f64 exactArea = ((f64)b->x - a->x) * ((f64)c->y - a->y) - ((f64)c->x - a->x) * ((f64)b->y - a->y);
+    if (area == 0 || exactArea == 0) return;
     if ((cull == 2 && area < 0) || (cull == 3 && area > 0)) return;
-    inv = 1.0f / area;
+    (void)inv;
+    depth_plane(&plane, a->x, a->y, a->z, b->x, b->y, b->z, c->x, c->y, c->z);
+    edges_setup(&edges, a->x, a->y, b->x, b->y, c->x, c->y, exactArea);
     minX = (s32)floorf(a->x < b->x ? (a->x < c->x ? a->x : c->x) : (b->x < c->x ? b->x : c->x));
     maxX = (s32)ceilf(a->x > b->x ? (a->x > c->x ? a->x : c->x) : (b->x > c->x ? b->x : c->x));
     minY = (s32)floorf(a->y < b->y ? (a->y < c->y ? a->y : c->y) : (b->y < c->y ? b->y : c->y));
@@ -265,20 +345,31 @@ static void draw_triangle(const DrawState *st, const TaVertex *a, const TaVertex
         for (x = minX; x <= maxX; x++)
         {
             f32 px = (f32)x + 0.5f;
-            f32 l0, l1, l2, z;
+            f32 l[3], l0, l1, l2, z;
             u32 *dst, color;
             if (TA_CLIP_MODE(st->clip) == 3 && (u32)x >> 5 >= TA_CLIP_X0(st->clip) && (u32)x >> 5 <= TA_CLIP_X1(st->clip) &&
                 (u32)y >> 5 >= TA_CLIP_Y0(st->clip) && (u32)y >> 5 <= TA_CLIP_Y1(st->clip))
                 continue;
-            l0 = ((b->x - px) * (c->y - py) - (c->x - px) * (b->y - py)) * inv;
-            l1 = ((c->x - px) * (a->y - py) - (a->x - px) * (c->y - py)) * inv;
-            l2 = 1.0f - l0 - l1;
-            if (l0 < 0 || l1 < 0 || l2 < 0) continue;
-            z = a->z * l0 + b->z * l1 + c->z * l2;
+            if (!edges_cover(&edges, px, py, l)) continue;
+            l0 = l[0];
+            l1 = l[1];
+            l2 = l[2];
+            z = depth_at(&plane, px, py);
             if (!depth_pass(st->depthMode, z, s_depth[y * w + x])) continue;
             {
-                u32 base = st->gouraud ? lerp_color(a->base, b->base, c->base, l0, l1, l2) : c->base;
-                u32 offs = st->gouraud ? lerp_color(a->offset, b->offset, c->offset, l0, l1, l2) : c->offset;
+                f32 c0 = l0, c1 = l1, c2 = l2;
+                if (st->gouraud)
+                {
+                    f64 p0 = (f64)l0 * a->z, p1 = (f64)l1 * b->z, p2 = (f64)l2 * c->z, sum = p0 + p1 + p2;
+                    if (sum > 0 && sum < 1e300)
+                    {
+                        c0 = (f32)(p0 / sum);
+                        c1 = (f32)(p1 / sum);
+                        c2 = (f32)(p2 / sum);
+                    }
+                }
+                u32 base = st->gouraud ? lerp_color(a->base, b->base, c->base, c0, c1, c2) : c->base;
+                u32 offs = st->gouraud ? lerp_color(a->offset, b->offset, c->offset, c0, c1, c2) : c->offset;
                 f32 u = 0, v = 0;
                 if (st->tex && z != 0)
                 {
@@ -308,12 +399,12 @@ static void setup_state(DrawState *st, const TaStrip *s)
     st->tsp = s->tsp;
     st->list = s->list;
     st->depthMode = (int)(s->isp >> 29);
-    if (s->list == TA_LIST_TRANS && !(pvr_reg(0x005F8098) & 1) && !s_depthPass && ta_strip_can_cover(&s_scene, s))
-        st->depthMode = st->depthMode == 4 ? 6 : st->depthMode == 1 ? 3 : st->depthMode;
+    if (s->list == TA_LIST_PUNCH || (s->list == TA_LIST_TRANS && !(pvr_reg(0x005F8098) & 1))) st->depthMode = 6;
     st->zWrite = !((s->isp >> 26) & 1);
     st->gouraud = (s->pcw >> 1) & 1;
     st->shadow = (s->pcw >> 7) & 1;
     st->offset = (s->pcw >> 2) & 1;
+    st->bump = ((s->pcw >> 3) & 1) && ((s->tcw >> 27) & 7) == 4;
     st->useAlpha = (s->tsp >> 20) & 1;
     st->ignoreTexAlpha = (s->tsp >> 19) & 1;
     st->shading = (int)((s->tsp >> 6) & 3);
@@ -461,9 +552,14 @@ static void mod_triangle(const TaModTri *t, int op, int cull, int w, int h)
 {
     f32 area = (t->x[1] - t->x[0]) * (t->y[2] - t->y[0]) - (t->x[2] - t->x[0]) * (t->y[1] - t->y[0]), inv;
     s32 minX, maxX, minY, maxY, x, y;
-    if (area == 0) return;
+    DepthPlane plane;
+    EdgeSet edges;
+    f64 exactArea = ((f64)t->x[1] - t->x[0]) * ((f64)t->y[2] - t->y[0]) - ((f64)t->x[2] - t->x[0]) * ((f64)t->y[1] - t->y[0]);
+    if (area == 0 || exactArea == 0) return;
+    depth_plane(&plane, t->x[0], t->y[0], t->z[0], t->x[1], t->y[1], t->z[1], t->x[2], t->y[2], t->z[2]);
     if ((cull == 2 && area < 0) || (cull == 3 && area > 0)) return;
-    inv = 1.0f / area;
+    (void)inv;
+    edges_setup(&edges, t->x[0], t->y[0], t->x[1], t->y[1], t->x[2], t->y[2], exactArea);
     minX = (s32)floorf(t->x[0] < t->x[1] ? (t->x[0] < t->x[2] ? t->x[0] : t->x[2]) : (t->x[1] < t->x[2] ? t->x[1] : t->x[2]));
     maxX = (s32)ceilf(t->x[0] > t->x[1] ? (t->x[0] > t->x[2] ? t->x[0] : t->x[2]) : (t->x[1] > t->x[2] ? t->x[1] : t->x[2]));
     minY = (s32)floorf(t->y[0] < t->y[1] ? (t->y[0] < t->y[2] ? t->y[0] : t->y[2]) : (t->y[1] < t->y[2] ? t->y[1] : t->y[2]));
@@ -478,16 +574,14 @@ static void mod_triangle(const TaModTri *t, int op, int cull, int w, int h)
         for (x = minX; x <= maxX; x++)
         {
             f32 px = (f32)x + 0.5f;
-            f32 l0 = ((t->x[1] - px) * (t->y[2] - py) - (t->x[2] - px) * (t->y[1] - py)) * inv;
-            f32 l1 = ((t->x[2] - px) * (t->y[0] - py) - (t->x[0] - px) * (t->y[2] - py)) * inv;
-            f32 l2 = 1.0f - l0 - l1;
+            f32 l[3];
             u8 *s = &s_stencil[y * w + x];
-            if (l0 < 0 || l1 < 0 || l2 < 0) continue;
+            if (!edges_cover(&edges, px, py, l)) continue;
             switch (op)
             {
             case MV_XOR:
             case MV_OR:
-                if (t->z[0] * l0 + t->z[1] * l1 + t->z[2] * l2 > s_depth[y * w + x]) *s = op == MV_XOR ? *s ^ 2 : *s | 2;
+                if (depth_at(&plane, px, py) > s_depth[y * w + x]) *s = op == MV_XOR ? *s ^ 2 : *s | 2;
                 break;
             case MV_INCLUDE: *s = (*s & 3) ? (*s & ~3) | 1 : *s & ~3; break;
             default: break;
@@ -530,44 +624,92 @@ static void draw_mod_volumes(int w, int h)
     }
 }
 
-static void vram32_write16(u32 off32, u32 v) { buf_w16(g_vram, vram_offset64(off32 & 0x007FFFFEu), (u16)v); }
-static void vram32_write32(u32 off32, u32 v) { buf_w32(g_vram, vram_offset64(off32 & 0x007FFFFCu), v); }
-static void vram32_write8(u32 off32, u32 v) { buf_w8(g_vram, vram_offset64(off32 & 0x007FFFFFu), (u8)v); }
-
-static void write_framebuffer(int w, int h)
+static void write_texture(int w, int h)
 {
-    u32 ctrl = pvr_reg(0x005F8048), base = pvr_reg(0x005F8060), stride = (pvr_reg(0x005F804C) & 0x1FF) * 8;
-    u32 mode = ctrl & 7, kval = (ctrl >> 8) & 0xFF, threshold = (ctrl >> 16) & 0xFF;
+    u32 ctrl = pvr_reg(0x005F8048), base = pvr_reg(0x005F8060) & (VRAM_SIZE - 1), stride = (pvr_reg(0x005F804C) & 0x1FF) * 8;
+    u32 xclip = pvr_reg(0x005F8068), yclip = pvr_reg(0x005F806C);
+    u32 mode = ctrl & 7, kbit = (ctrl & 0x8000u), threshold = (ctrl >> 16) & 0xFF;
     int hscale = (pvr_reg(0x005F80F4) >> 16) & 1, outW = hscale ? w / 2 : w, x, y;
-    for (y = 0; y < h; y++)
+    int x0 = (int)(xclip & 0x7FF), x1 = (int)((xclip >> 16) & 0x7FF) + 1, y0 = (int)(yclip & 0x3FF), y1 = (int)((yclip >> 16) & 0x3FF) + 1;
+    u32 first = ~0u, last = 0;
+    if (mode > 3)
+    {
+        static int warned;
+        if (!warned++) LOG_WARN("[soft] render to texture with packing %u (24 or 32-bit): not written", mode);
+        return;
+    }
+    if (!stride) stride = (u32)outW * 2;
+    if (x1 > outW) x1 = outW;
+    if (x1 > (int)(stride / 2)) x1 = (int)(stride / 2);
+    if (y1 > h) y1 = h;
+    for (y = y0; y < y1; y++)
     {
         u32 line = base + (u32)y * stride;
-        for (x = 0; x < outW; x++)
+        for (x = x0; x < x1; x++)
         {
-            u32 c = s_color[y * w + (hscale ? x * 2 : x)], r, g, b, a = c >> 24;
+            u32 c = s_color[y * w + (hscale ? x * 2 : x)], r, g, b, a, v, off;
             if (hscale)
             {
                 u32 c2 = s_color[y * w + x * 2 + 1];
                 c = (((c >> 1) & 0x7F7F7F7Fu) + ((c2 >> 1) & 0x7F7F7F7Fu));
-                a = c >> 24;
             }
+            a = c >> 24;
             r = (c >> 16) & 255;
             g = (c >> 8) & 255;
             b = c & 255;
             switch (mode)
             {
-            case 0: vram32_write16(line + x * 2, ((kval & 0x80) << 8) | (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3)); break;
-            case 1: vram32_write16(line + x * 2, (r >> 3) << 11 | (g >> 2) << 5 | (b >> 3)); break;
-            case 2: vram32_write16(line + x * 2, (a >> 4) << 12 | (r >> 4) << 8 | (g >> 4) << 4 | (b >> 4)); break;
-            case 3: vram32_write16(line + x * 2, (a >= threshold ? 0x8000u : 0) | (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3)); break;
-            case 4:
-                vram32_write8(line + x * 3, b);
-                vram32_write8(line + x * 3 + 1, g);
-                vram32_write8(line + x * 3 + 2, r);
-                break;
-            case 5: vram32_write32(line + x * 4, (kval << 24) | (c & 0xFFFFFF)); break;
-            default: vram32_write32(line + x * 4, c); break;
+            case 0: v = (kbit ? 0x8000u : 0) | (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3); break;
+            case 1: v = (r >> 3) << 11 | (g >> 2) << 5 | (b >> 3); break;
+            case 2: v = (a >> 4) << 12 | (r >> 4) << 8 | (g >> 4) << 4 | (b >> 4); break;
+            default: v = (a >= threshold ? 0x8000u : 0) | (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3); break;
             }
+            off = (line + (u32)x * 2) & (VRAM_SIZE - 2);
+            buf_w16(g_vram, off, (u16)v);
+            if (off < first) first = off;
+            if (off > last) last = off;
+        }
+    }
+    if (first <= last)
+    {
+        u32 p;
+        for (p = first & ~0xFFFu; p <= last; p += 0x1000) vram_mark(p);
+    }
+}
+
+static void write_framebuffer(int w, int h)
+{
+    u32 ctrl = pvr_reg(0x005F8048), base = pvr_reg(0x005F8060), stride = (pvr_reg(0x005F804C) & 0x1FF) * 8;
+    u32 xclip = pvr_reg(0x005F8068), yclip = pvr_reg(0x005F806C);
+    int hscale = (pvr_reg(0x005F80F4) >> 16) & 1, outW = hscale ? w / 2 : w, x, y;
+    int rx0, ry0, rx1, ry1, cx0 = (int)(xclip & 0x7FF), cy0 = (int)(yclip & 0x3FF);
+    if ((base >> 24) & 1)
+    {
+        write_texture(w, h);
+        return;
+    }
+    ta_region_rect(NULL, &rx0, &ry0, &rx1, &ry1);
+    if (hscale)
+    {
+        rx0 /= 2;
+        rx1 /= 2;
+    }
+    if (rx0 < cx0) rx0 = cx0;
+    if (ry0 < cy0) ry0 = cy0;
+    if (rx1 > outW) rx1 = outW;
+    if (ry1 > h) ry1 = h;
+    for (y = ry0; y < ry1; y++)
+    {
+        u32 line = base + (u32)y * stride;
+        for (x = rx0; x < rx1; x++)
+        {
+            u32 c = s_color[y * w + (hscale ? x * 2 : x)];
+            if (hscale)
+            {
+                u32 c2 = s_color[y * w + x * 2 + 1];
+                c = (((c >> 1) & 0x7F7F7F7Fu) + ((c2 >> 1) & 0x7F7F7F7Fu));
+            }
+            pvr_fb_store(line, (u32)x, c, ctrl);
         }
     }
 }
@@ -581,11 +723,49 @@ const u32 *soft_render_image(int *w, int *h)
     return s_color;
 }
 
+const char *g_soft_dump_path;
+
+static void dump_words(FILE *f, const u32 *p, u32 n)
+{
+    u32 i;
+    for (i = 0; i < n; i++)
+    {
+        u8 b[4];
+        b[0] = (u8)p[i]; b[1] = (u8)(p[i] >> 8); b[2] = (u8)(p[i] >> 16); b[3] = (u8)(p[i] >> 24);
+        fwrite(b, 1, 4, f);
+    }
+}
+
+static void dump_scene(const u32 *ta, u32 words)
+{
+    u32 hd[8] = { SCENE_DUMP_MAGIC, 1, PVR_REG_WORDS, words, VRAM_SIZE, 0, 0, 0 };
+    u32 *regs = (u32 *)malloc(PVR_REG_WORDS * 4);
+    FILE *f = fopen(g_soft_dump_path, "wb");
+    g_soft_dump_path = NULL;
+    if (f && regs)
+    {
+        pvr_regs_copy(regs);
+        dump_words(f, hd, 8);
+        dump_words(f, regs, PVR_REG_WORDS);
+        dump_words(f, ta, words);
+        dump_words(f, (const u32 *)g_vram, VRAM_SIZE / 4);
+    }
+    if (f) fclose(f);
+    free(regs);
+}
+
 void soft_render_frame(void)
 {
     u32 words, xclip = pvr_reg(0x005F8068), yclip = pvr_reg(0x005F806C), i;
     const u32 *data = pvr_ta_data(&words);
+    if (g_soft_dump_path) dump_scene(data, words);
     int w = (int)((xclip >> 16) & 0x7FF) + 1, h = (int)((yclip >> 16) & 0x3FF) + 1;
+    {
+        u32 glob = pvr_reg(0x005F813C);
+        int tw = (int)((glob & 0x3F) + 1) * 32, th = (int)(((glob >> 16) & 0xF) + 1) * 32;
+        if (w > tw) w = tw;
+        if (h > th) h = th;
+    }
     if ((pvr_reg(0x005F80F4) >> 16) & 1) w *= 2;
     if (w > MAX_W) w = MAX_W;
     if (h > MAX_H) h = MAX_H;
@@ -630,7 +810,7 @@ void soft_render_frame(void)
     s_texPoolUsed = 0;
     for (i = 0; i < (u32)(w * h); i++)
     {
-        s_color[i] = s_scene.bgColor;
+        s_color[i] = s_scene.bgColorFog;
         s_depth[i] = s_scene.bgDepth;
     }
     memset(s_stencil, 0, (size_t)(w * h));

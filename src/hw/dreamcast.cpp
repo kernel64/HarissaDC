@@ -80,7 +80,9 @@ static void area0_write(u32 addr, u32 value, int size)
 
 static u32 vram32_read(u32 addr, int size)
 {
-    u32 off = vram_offset64(addr & 0x007FFFFFu);
+    u32 off;
+    pvr_fb_check(addr & 0x007FFFFFu);
+    off = vram_offset64(addr & 0x007FFFFFu);
     if (size == 4) return buf_r32(g_vram, off & ~3u);
     if (size == 2) return buf_r16(g_vram, off & ~1u);
     return buf_r8(g_vram, off);
@@ -88,7 +90,9 @@ static u32 vram32_read(u32 addr, int size)
 
 static void vram32_write(u32 addr, u32 value, int size)
 {
-    u32 off = vram_offset64(addr & 0x007FFFFFu);
+    u32 off;
+    pvr_fb_check(addr & 0x007FFFFFu);
+    off = vram_offset64(addr & 0x007FFFFFu);
     vram_mark(off);
     if (size == 4) buf_w32(g_vram, off & ~3u, value);
     else if (size == 2) buf_w16(g_vram, off & ~1u, (u16)value);
@@ -138,6 +142,7 @@ int dc_init(void)
     maple_init();
     gdrom_init();
     aica_init();
+    hle_bios_init();
     return 0;
 }
 
@@ -173,11 +178,22 @@ static int load_file(const char *path, u8 *dst, u32 size, char *error, int error
     return 0;
 }
 
+static u32 s_biosId;
+
+static u32 bios_hash(void)
+{
+    u32 h = 2166136261u, i;
+    for (i = 0; i < BIOS_SIZE; i += 4) h = (h ^ buf_r32(g_bios, i)) * 16777619u;
+    return h ? h : 1;
+}
+
 int dc_load_bios(const char *bootPath, const char *flashPath, char *error, int errorSize)
 {
-    g_sh4_hle_trap = NULL;
+    hle_bios_uninstall();
     if (load_file(bootPath, g_bios, BIOS_SIZE, error, errorSize)) return -1;
     if (load_file(flashPath, g_flash, FLASH_SIZE, error, errorSize)) return -1;
+    s_biosId = bios_hash();
+    flash_set_date(host_time() + 631152000u);
     LOG_INFO("[dc] BIOS %s and flash %s loaded", bootPath, flashPath);
     return 0;
 }
@@ -188,12 +204,14 @@ void dc_set_bios(const u8 *boot, u32 bootSize, const u8 *flash, u32 flashSize)
     memset(g_flash, 0xFF, FLASH_SIZE);
     if (boot) mem_import_bytes(g_bios, boot, bootSize < BIOS_SIZE ? bootSize & ~3u : BIOS_SIZE);
     if (flash) mem_import_bytes(g_flash, flash, flashSize < FLASH_SIZE ? flashSize & ~3u : FLASH_SIZE);
+    s_biosId = bios_hash();
 }
 
 void dc_use_hle_bios(int region, int language)
 {
     static const char *const names[3] = { "Japan", "USA", "Europe" };
     hle_bios_install(region, language);
+    s_biosId = 0;
     LOG_INFO("[dc] HLE BIOS (no Sega BIOS files), region %s, language %d", names[region >= 0 && region <= 2 ? region : 1], language);
 }
 
@@ -283,12 +301,15 @@ int dc_run_frame(void)
 }
 
 #define STATE_MAGIC 0x54534344u
-#define STATE_VERSION 1u
+#define STATE_VERSION 2u
 
 struct StateHeader
 {
     u32 magic, version, layout, total;
 };
+
+#define STATE_BIOS_UNKNOWN 0xFFFFFFFFu
+static u32 s_stateBios;
 
 static u32 state_layout(void)
 {
@@ -304,6 +325,9 @@ static void machine_state(StateIO *io)
     h.layout = state_layout();
     h.total = 0;
     STATE(io, h);
+    s_stateBios = s_biosId;
+    if (!io->loading || h.version >= 2) STATE(io, s_stateBios);
+    else s_stateBios = STATE_BIOS_UNKNOWN;
     sched_state(io);
     mem_state(io);
     sh4_state(io);
@@ -351,15 +375,22 @@ u32 dc_state_bytes(const u8 *buf, u32 size)
     StateHeader h;
     if (size < sizeof(h)) return 0;
     memcpy(&h, buf, sizeof(h));
-    if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || (h.layout != state_layout() && !g_state_any_layout)) return 0;
+    if (h.magic != STATE_MAGIC || h.version < 1 || h.version > STATE_VERSION || (h.layout != state_layout() && !g_state_any_layout)) return 0;
     return h.total;
 }
 
 int dc_state_load(const u8 *buf, u32 size)
 {
     StateIO io;
+    StateHeader h;
+    u8 *flash;
+    int otherBios;
     if (dc_state_bytes(buf, size) != size || size < sizeof(StateHeader)) return -1;
+    memcpy(&h, buf, sizeof(h));
+    flash = (u8 *)malloc(FLASH_SIZE);
+    if (flash) memcpy(flash, g_flash, FLASH_SIZE);
     sound_thread_hold();
+    sh4_irq_reset();
     memset(&io, 0, sizeof(io));
     io.buf = (u8 *)buf;
     io.size = size;
@@ -368,9 +399,22 @@ int dc_state_load(const u8 *buf, u32 size)
     if (io.error || io.pos != size)
     {
         LOG_ERROR("[dc] damaged save state (at byte %u of %u): reset", io.pos, size);
+        if (flash) memcpy(g_flash, flash, FLASH_SIZE);
+        free(flash);
         dc_reset();
         return -1;
     }
+    if (h.version < 2 && !hle_bios_in_ram()) sched_state_insert_idle(hle_bios_first_event(), 2);
+    if (s_stateBios == STATE_BIOS_UNKNOWN) otherBios = hle_bios_in_ram() != hle_bios_installed();
+    else otherBios = s_stateBios != s_biosId;
+    if (otherBios)
+    {
+        LOG_INFO("[dc] save state made with another BIOS (%s): the console's flash kept",
+                 hle_bios_in_ram() ? "built-in" : "Sega's");
+        if (flash) memcpy(g_flash, flash, FLASH_SIZE);
+    }
+    free(flash);
+    hle_bios_after_load();
     sh4_jit_flush();
     sound_thread_set_time(sched_now());
     sh4_irq_update();

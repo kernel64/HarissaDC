@@ -56,7 +56,7 @@ struct TaScene
     u32 modTriCount, modTriCap;
     TaModVol *modVols;
     u32 modVolCount, modVolCap;
-    u32 bgColor;
+    u32 bgColor, bgColorFog;
     f32 bgDepth;
     f32 zMax, zHuge;
 };
@@ -64,6 +64,8 @@ struct TaScene
 int ta_strip_can_cover(const TaScene *sc, const TaStrip *s);
 
 void ta_scene_orientation(const TaScene *s, f32 xScale, f32 *across, f32 *down, f32 *up);
+
+void ta_region_rect(const u32 *regs, int *x0, int *y0, int *x1, int *y1);
 
 void ta_scene_init(TaScene *s);
 void ta_scene_free(TaScene *s);

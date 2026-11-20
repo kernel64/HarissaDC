@@ -8,6 +8,13 @@
 
 int NetStart(int retry);
 
+void NetTestOff(int mode);
+int NetTestMode(void);
+
 int NetGet(const char *host, const char *path, int follow, u8 **body, u32 *len, u32 maxLen, char *location, int locSize);
+
+int NetPost(const char *host, const char *path, const char *data, const char *type, const char *agent, u8 **body, u32 *len, u32 maxLen);
+int NetDownload(const char *url, const char *file, u32 expected, int (*progress)(void *user, u32 done, u32 total), void *user);
+int NetSha256File(const char *file, char hex[65], int (*progress)(void *user, u32 done, u32 total), void *user);
 
 #endif

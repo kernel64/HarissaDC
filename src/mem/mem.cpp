@@ -154,6 +154,25 @@ static u8 *window_ram(void)
     return w + MEM_WINDOW_RAM;
 }
 
+u8 *mem_window_ocram(int commit)
+{
+    u8 *p;
+    if (!g_mem_window) return NULL;
+    p = g_mem_window + MEM_WINDOW_OCRAM;
+#if defined(_XBOX)
+    if (commit) return (u8 *)VirtualAlloc(p, 0x2000, MEM_COMMIT, PAGE_READWRITE);
+    VirtualFree(p, 0x2000, MEM_DECOMMIT);
+    return NULL;
+#elif defined(__linux__)
+    if (commit) return mprotect(p, 0x2000, PROT_READ | PROT_WRITE) == 0 ? p : NULL;
+    mprotect(p, 0x2000, PROT_NONE);
+    return NULL;
+#else
+    (void)commit;
+    return NULL;
+#endif
+}
+
 static void window_release(void)
 {
 #if defined(_XBOX)

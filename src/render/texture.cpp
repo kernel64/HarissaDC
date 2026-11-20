@@ -65,7 +65,7 @@ static u32 convert16(u32 fmt, u32 c)
     case 0: return from1555(c);
     case 1: return from565(c);
     case 2: return from4444(c);
-    default: return 0xFF000000u | (c & 0xFF) * 0x010101u;
+    default: return ((c & 0xFF00u) << 16) | ((c & 0xFFu) << 16);
     }
 }
 
@@ -79,6 +79,11 @@ static u32 palette_entry(const u32 *pal, u32 fmt, u32 index)
     case 2: return from4444(c & 0xFFFF);
     default: return c;
     }
+}
+
+u32 tex_palette_color(u32 raw, u32 palFormat)
+{
+    return palette_entry(&raw, palFormat, 0);
 }
 
 static u32 mip_offset(u32 n)
@@ -124,7 +129,7 @@ static void twiddle_tables(u32 w, u32 h, u32 *xo, u32 *yo)
             for (x = 0; x < w; x++) o[x] = CONV(buf_r16(vram, (addr + (xo[x] + yo[y]) * 2) & VRAM_MASK)); \
     }
 
-static u32 fromBump(u32 c) { return 0xFF000000u | (c & 0xFF) * 0x010101u; }
+static u32 fromBump(u32 c) { return ((c & 0xFF00u) << 16) | ((c & 0xFFu) << 16); }
 
 int tex_rect_ok(const TexDesc *d)
 {

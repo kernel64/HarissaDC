@@ -31,5 +31,6 @@ void sched_report(char *out, u32 size);
 
 struct StateIO;
 void sched_state(StateIO *io);
+void sched_state_insert_idle(int at, int count);
 
 #endif

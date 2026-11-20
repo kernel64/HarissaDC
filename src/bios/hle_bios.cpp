@@ -171,8 +171,10 @@ struct GdHle
 };
 
 static GdHle s_gd;
-static int s_evDma;
-static int s_evStreamDma;
+static int s_evDma = -1;
+static int s_evStreamDma = -1;
+static int s_installed;
+static int s_borrowed;
 
 static void reset_mode(void)
 {
@@ -842,10 +844,29 @@ void hle_bios_install(int region, int language)
     memset(g_bios, 0, BIOS_SIZE);
     buf_w16(g_bios, 0, SH4_HLE_TRAP_OPCODE);
     make_flash();
+    hle_bios_init();
     g_sh4_hle_trap = trap;
+    s_installed = 1;
+    s_borrowed = 0;
+    s_bootStatus = 0;
+}
+
+void hle_bios_init(void)
+{
     s_evDma = sched_register("hle_gd_dma", dma_event, NULL);
     s_evStreamDma = sched_register("hle_gd_stream_dma", stream_dma_event, NULL);
-    s_bootStatus = 0;
+}
+
+void hle_bios_uninstall(void)
+{
+    g_sh4_hle_trap = NULL;
+    s_installed = 0;
+    s_borrowed = 0;
+}
+
+int hle_bios_installed(void)
+{
+    return s_installed;
 }
 
 void hle_bios_reset(void)
@@ -853,6 +874,40 @@ void hle_bios_reset(void)
     memset(&s_gd, 0, sizeof(s_gd));
     reset_mode();
     s_bootStatus = 0;
+    if (s_borrowed)
+    {
+        g_sh4_hle_trap = NULL;
+        s_borrowed = 0;
+    }
+}
+
+int hle_bios_in_ram(void)
+{
+    return buf_r32(g_ram, VEC_GDROM & (RAM_SIZE - 1)) == TRAP_GDROM &&
+           buf_r16(g_ram, TRAP_GDROM & (RAM_SIZE - 1)) == SH4_HLE_TRAP_OPCODE &&
+           buf_r16(g_ram, TRAP_SYSINFO & (RAM_SIZE - 1)) == SH4_HLE_TRAP_OPCODE;
+}
+
+int hle_bios_first_event(void)
+{
+    return s_evDma;
+}
+
+void hle_bios_after_load(void)
+{
+    int hle = hle_bios_in_ram();
+    if (s_installed) return;
+    if (hle && !s_borrowed)
+    {
+        LOG_INFO("[hle] save state of the HLE BIOS with Sega's BIOS: its syscalls stay emulated until a reset");
+        g_sh4_hle_trap = trap;
+        s_borrowed = 1;
+    }
+    else if (!hle && s_borrowed)
+    {
+        g_sh4_hle_trap = NULL;
+        s_borrowed = 0;
+    }
 }
 
 int hle_bios_boot_status(void)

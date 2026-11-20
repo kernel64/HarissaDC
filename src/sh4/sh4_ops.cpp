@@ -394,7 +394,11 @@ void (*g_sh4_illegal_hook)(u32 pc);
 
 SH4OP(illegal)
 {
-    LOG_ERROR("[sh4] illegal instruction %04X at %08X", op, C.pc - 2);
+    static u32 count;
+    count++;
+    if (count <= 8 || !(count & (count - 1)))
+        LOG_ERROR("[sh4] illegal instruction %04X at %08X (%u times), pr %08X spc %08X ssr %08X vbr %08X r15 %08X @r15 %08X %08X",
+                  op, C.pc - 2, count, C.pr, C.spc, C.ssr, C.vbr, R[15], mem_read32(R[15]), mem_read32(R[15] + 4));
     if (g_sh4_illegal_hook) g_sh4_illegal_hook(C.pc - 2);
     sh4_exception(0x180, C.pc - 2);
 }

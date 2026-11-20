@@ -7,6 +7,7 @@
 #include "../core/types.h"
 
 #define ARM7_CLOCK_HZ 22579200u
+#define ARM7_INSN_CYCLES 6
 
 struct Arm7Ctx
 {

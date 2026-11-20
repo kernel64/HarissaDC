@@ -17,6 +17,7 @@
 #define FRAME 416
 #define SAVE_SLOT(r) (FRAME - 16 - 8 * (s32)(31 - (r)))
 #define FSAVE_SLOT(f) (112 + 8 * (s32)((f) - 14))
+#define CR_SLOT 256
 #define OFF_R(n) ((s32)offsetof(Sh4Ctx, r) + 4 * (s32)(n))
 #define OFF_T ((s32)offsetof(Sh4Ctx, t))
 #define OFF_PC ((s32)offsetof(Sh4Ctx, pc))
@@ -67,6 +68,7 @@ struct ColdStub
     u32 site, fault;
     u8 kind, size, reg;
     u8 areg;
+    u8 recheck;
     u32 atMore[MMU_MAX_AT - 1], atCount;
     u8 sreg[16], sfr[16], st;
     u32 instPc;
@@ -95,6 +97,7 @@ struct Gen
     u32 lastSub;
     u32 fp;
     int wrote;
+    int stackFar;
     int marked;
     int fastChecked, fastOk;
     int fdOk;
@@ -104,8 +107,16 @@ struct Gen
     SideExit side[MAX_SIDE];
     u32 sideCount;
     u32 prev;
+    u32 prev2;
     int srInR5;
     int fpulFr;
+    int fpscrValid;
+    u32 fpscrPos;
+    int tPend, tSense;
+    u32 tBit;
+    u32 endPc;
+    u32 sqRegs;
+    u32 ocRegs;
     int sqHint;
     int ocHint;
     struct { u8 base, src, used; u8 disp; } fwd[4];
@@ -191,8 +202,11 @@ static void def_const(Gen *g, u32 n, u32 v)
     g->knownVal[n] = v;
 }
 
+static void t_materialize(Gen *g);
+
 static u32 getT(Gen *g)
 {
+    if (g->tPend) t_materialize(g);
     if (g->t == RS_NONE)
     {
         ppc_lwz(g->c, R_T, OFF_T, R_CTX);
@@ -203,9 +217,19 @@ static u32 getT(Gen *g)
 
 static u32 defT(Gen *g)
 {
+    g->tPend = 0;
     g->t = RS_DIRTY;
     return R_T;
 }
+
+static f32 s_byteFloat[256];
+static struct ByteFloatInit
+{
+    ByteFloatInit()
+    {
+        for (int i = 0; i < 256; i++) s_byteFloat[i] = (f32)i;
+    }
+} s_byteFloatInit;
 
 static u32 FH(u32 n) { return 14 + n; }
 
@@ -476,6 +500,8 @@ int sh4_jit_gen_trampoline(PpcCode *c, u32 **enter, u32 **exit)
 #endif
     ppc_mflr(c, 0);
     ppc_std(c, 0, FRAME - 8, 1);
+    ppc_mfcr(c, 0);
+    ppc_stw(c, 0, CR_SLOT, 1);
     for (r = 14; r < 32; r++) ppc_std(c, r, SAVE_SLOT(r), 1);
     for (r = 14; r < 32; r++) ppc_stfd(c, r, FSAVE_SLOT(r), 1);
     ppc_load_ptr_const(c, R_CTX, ppc_addr_of(&g_sh4));
@@ -492,6 +518,8 @@ int sh4_jit_gen_trampoline(PpcCode *c, u32 **enter, u32 **exit)
     ppc_stw(c, R_CYC, OFF_CYCLES, R_CTX);
     for (r = 14; r < 32; r++) ppc_ld(c, r, SAVE_SLOT(r), 1);
     for (r = 14; r < 32; r++) ppc_lfd(c, r, FSAVE_SLOT(r), 1);
+    ppc_lwz(c, 0, CR_SLOT, 1);
+    ppc_mtcrf(c, 0x38, 0);
     ppc_ld(c, 0, FRAME - 8, 1);
     ppc_mtlr(c, 0);
     ppc_addi(c, 1, 1, FRAME);
@@ -803,6 +831,18 @@ static void fast_addr(Gen *g, u32 ra, u32 me)
     if (g->info->mirror) ppc_rlwinm(g->c, 4, 4, 0, 8, 5);
 }
 
+static void store_recheck(PpcCode *c, const ColdStub *s, int size)
+{
+    u32 code;
+    ppc_rlwinm(c, 0, 4, 31, 29, 31);
+    ppc_srw(c, 6, 6, 0);
+    ppc_rlwinm(c, 6, 6, 0, size == 4 ? 30 : 31, 31);
+    ppc_cmplwi(c, 0, 6, 0);
+    code = ppc_bc_fwd(c, 4, 0, PPC_EQ);
+    ppc_b_to(c, c->buf + s->at + 1);
+    ppc_patch_here(c, code);
+}
+
 static void emit_cold_stub(Gen *g, const ColdStub *s)
 {
     PpcCode *c = g->c;
@@ -960,6 +1000,7 @@ static void emit_cold_stub(Gen *g, const ColdStub *s)
             ppc_patch_here(c, notSq);
         }
     case COLD_STORE_CODE:
+        if (s->recheck) store_recheck(c, s, s->size);
         ppc_mr(c, 4, s->reg);
         call_c(c, write_fn(s->size));
         break;
@@ -980,6 +1021,7 @@ static void emit_cold_stub(Gen *g, const ColdStub *s)
         ppc_b_to(c, c->buf + s->back);
         ppc_patch_here(c, notSq);
     case COLD_FSTORE_CODE:
+        if (s->recheck) store_recheck(c, s, 4);
         ppc_stfs(c, s->reg, OFF_FR(s->size), R_CTX);
         ppc_lwz(c, 4, OFF_FR(s->size), R_CTX);
         ppc_stw(c, 3, OFF_TEMP(2), R_CTX);
@@ -1001,6 +1043,7 @@ static void add_cold(Gen *g, u32 at, int kind, int size, u32 reg)
     st.size = (u8)size;
     st.reg = (u8)reg;
     st.areg = 0;
+    st.recheck = 0;
     if (g->coldCount < MAX_COLD)
         g->cold[g->coldCount++] = st;
     else
@@ -1193,6 +1236,7 @@ static void add_side_cold(Gen *g, u32 at)
     st.kind = COLD_SIDE;
     st.size = 0;
     st.areg = 0;
+    st.recheck = 0;
     st.reg = (u8)g->sideCount++;
     g->cold[g->coldCount++] = st;
 }
@@ -1220,6 +1264,7 @@ static void add_cold_fast_a(Gen *g, int kind, int size, u32 reg, u32 site, u32 f
     st.size = (u8)size;
     st.reg = (u8)reg;
     st.areg = (u8)areg;
+    st.recheck = 0;
     if (g->coldCount < MAX_COLD)
         g->cold[g->coldCount++] = st;
     else
@@ -1239,7 +1284,7 @@ static void emit_load(Gen *g, u32 rd, int size);
 
 static void oc_hint(Gen *g, u32 n)
 {
-    g->ocHint = (int)((g->info->ocRegs >> n) & 1);
+    g->ocHint = (int)((g->ocRegs >> n) & 1);
 }
 
 static u32 oc_inline(Gen *g, u32 reg, int size, int store)
@@ -1256,7 +1301,8 @@ static u32 oc_inline(Gen *g, u32 reg, int size, int store)
     ppc_or(c, 4, 4, 6);
     if (size == 1) ppc_xori(c, 4, 4, 3);
     else if (size == 2) ppc_xori(c, 4, 4, 2);
-    ppc_load_ptr_const(c, 5, ppc_addr_of(sh4_ocram_bytes()));
+    ppc_load_ptr_const(c, 5, ppc_addr_of(sh4_ocram_ptr()));
+    ppc_load_ptr(c, 5, 0, 5);
     if (store)
     {
         if (size == 4) ppc_stwx(c, reg, 5, 4);
@@ -1351,7 +1397,7 @@ static void emit_load(Gen *g, u32 rd, int size)
 
 static void sq_hint(Gen *g, u32 n)
 {
-    g->sqHint = (int)((g->info->sqRegs >> n) & 1);
+    g->sqHint = (int)((g->sqRegs >> n) & 1);
 }
 
 static u32 sq_check_mmu(Gen *g)
@@ -1437,6 +1483,28 @@ static u32 code_test(Gen *g, int size)
     return ppc_bc_fwd(c, 4, 0, PPC_EQ);
 }
 
+static u32 code_test_coarse(Gen *g)
+{
+    PpcCode *c = g->c;
+    ppc_rlwinm(c, 6, 4, 28, 12, 31);
+    ppc_load_ptr(c, 5, OFF_JCODE, R_CTX);
+    ppc_lbzx(c, 6, 5, 6);
+    ppc_cmplwi(c, 0, 6, 0);
+    return ppc_bc_fwd(c, 4, 0, PPC_EQ);
+}
+
+static void add_cold_recheck(Gen *g, u32 at, int kind, int size, u32 reg)
+{
+    u32 k = g->coldCount;
+    if (k < MAX_COLD)
+    {
+        add_cold(g, at, kind, size, reg);
+        g->cold[k].recheck = 1;
+    }
+    else
+        add_cold(g, at, kind, size, reg);
+}
+
 static void emit_store(Gen *g, u32 rs, int size)
 {
     PpcCode *c = g->c;
@@ -1464,7 +1532,7 @@ static void emit_store(Gen *g, u32 rs, int size)
     {
         u32 site = c->pos, fault;
         fast_addr(g, 3, size == 4 ? 29 : size == 2 ? 30 : 31);
-        slow2 = code_test(g, size);
+        slow2 = code_test_coarse(g);
         if (size == 1) ppc_xori(c, 4, 4, 3);
         else if (size == 2) ppc_xori(c, 4, 4, 2);
         ppc_load_ptr_const(c, 5, ppc_addr_of(g_mem_window));
@@ -1473,7 +1541,7 @@ static void emit_store(Gen *g, u32 rs, int size)
         else if (size == 2) ppc_sthx(c, rs, 5, 4);
         else ppc_stbx(c, rs, 5, 4);
         add_cold_fast(g, COLD_STORE_OTHER, size, rs, site, fault);
-        add_cold(g, slow2, COLD_STORE_CODE, size, rs);
+        add_cold_recheck(g, slow2, COLD_STORE_CODE, size, rs);
         if (sq) ppc_patch_here(c, sq);
         if (oc) ppc_patch_here(c, oc);
         return;
@@ -1522,6 +1590,73 @@ static void t_less(Gen *g, u32 a, u32 b, int sign)
     }
     ppc_subf(c, 3, 4, 3);
     ppc_srdi(c, defT(g), 3, 63);
+}
+
+static int slot_keeps_t(u16 op);
+#define T_CR 2
+#define T_PEND_LOOK 8
+
+static int t_pend_ok(Gen *g)
+{
+    u32 k;
+    if (g->info->mmu || g->inSlot || g->skip.active || g->tPend) return 0;
+    for (k = 1; k <= T_PEND_LOOK; k++)
+    {
+        u32 addr = g->pc + 2 * k;
+        u16 op, top;
+        if (addr >= g->endPc) return 0;
+        op = code_at(g, addr);
+        top = op >> 8;
+        if (top == 0x89 || top == 0x8B) return 1;
+        if (top == 0x8D || top == 0x8F)
+        {
+            u16 slot = code_at(g, addr + 2);
+            return slot_keeps_t(slot) && (slot & 0xF0FF) != 0x0002 && !sh4_op_ends_block(slot);
+        }
+        if (sh4_op_ends_block(op) || !slot_keeps_t(op) || (op & 0xF0FF) == 0x0002 || (op & 0xF0FF) == 0x4003) return 0;
+    }
+    return 0;
+}
+
+static void t_pend(Gen *g, u32 bit, int sense)
+{
+    g->tPend = 1;
+    g->tBit = bit;
+    g->tSense = sense;
+    g->t = RS_NONE;
+}
+
+static void t_materialize(Gen *g)
+{
+    PpcCode *c = g->c;
+    u32 skip;
+    g->tPend = 0;
+    ppc_li(c, R_T, 1);
+    skip = ppc_bc_fwd(c, g->tSense ? 12 : 4, T_CR, g->tBit);
+    ppc_li(c, R_T, 0);
+    ppc_patch_here(c, skip);
+    g->t = RS_DIRTY;
+}
+
+static void t_pend_li(Gen *g, int v)
+{
+    ppc_li(g->c, R_T, v);
+    g->t = RS_DIRTY;
+}
+
+static u32 t_pend_bc(Gen *g, int whenT)
+{
+    int bitSet = whenT ? g->tSense : !g->tSense;
+    return ppc_bc_fwd(g->c, bitSet ? 12 : 4, T_CR, g->tBit);
+}
+
+static u32 t_pend_branch(Gen *g, int whenTaken)
+{
+    u32 at;
+    t_pend_li(g, whenTaken);
+    at = t_pend_bc(g, whenTaken);
+    g->tPend = 0;
+    return at;
 }
 
 static int is_op(u16 op, u16 mask, u16 key) { return (op & mask) == key; }
@@ -1652,12 +1787,14 @@ static void emit_literal(Gen *g, u32 n, u32 addr, int size)
     int mmu = g->info->mmu;
     u32 off = (mmu ? g->info->physStart + (addr - g->start) : addr) & (RAM_SIZE - 1), sub = off >> 9;
     u8 why = 0;
+    int inParts = (sub >= g->firstSub && sub <= g->lastSub) ||
+                  (!mmu && (off >> 12) == ((g->start & (RAM_SIZE - 1)) >> 12));
     if (g_sh4_jit_count_calls)
         why = !(mmu ? (addr ^ g->start) < 1024u : (addr & 0x1C000000u) == 0x0C000000u) ? 1
-                     : !(sub >= g->firstSub && sub <= g->lastSub)                              ? 2
+                     : !inParts                                                                ? 2
                      : g->wrote                                                                ? 3
                      : sh4_jit_literal_written(off)                                            ? 4 : 0;
-    if ((mmu ? (addr ^ g->start) < 1024u : (addr & 0x1C000000u) == 0x0C000000u) && sub >= g->firstSub && sub <= g->lastSub &&
+    if ((mmu ? (addr ^ g->start) < 1024u : (addr & 0x1C000000u) == 0x0C000000u) && inParts &&
         !g->wrote && !sh4_jit_literal_written(off))
     {
         def_const(g, n, size == 4 ? buf_r32(g_ram, off) : (u32)(s32)(s16)buf_r16(g_ram, off));
@@ -1778,12 +1915,12 @@ static void emit_fstore(Gen *g, u32 m)
     {
         u32 site = c->pos, fault;
         fast_addr(g, 3, 29);
-        slow2 = code_test(g, 4);
+        slow2 = code_test_coarse(g);
         ppc_load_ptr_const(c, 5, ppc_addr_of(g_mem_window));
         fault = c->pos;
         ppc_stfsx(c, f, 5, 4);
         add_cold_fast(g, COLD_FSTORE_OTHER, (int)m, f, site, fault);
-        add_cold(g, slow2, COLD_FSTORE_CODE, (int)m, f);
+        add_cold_recheck(g, slow2, COLD_FSTORE_CODE, (int)m, f);
         if (sq) ppc_patch_here(c, sq);
         return;
     }
@@ -1955,6 +2092,23 @@ static void emit_ftrv(Gen *g, u16 op)
     for (i = 0; i < 4; i++) dn_flush(g, v[i]);
 }
 
+static void fpscr_flip(Gen *g, u32 bits)
+{
+    PpcCode *c = g->c;
+    u32 k;
+    int ok = g->fpscrValid && g->fpscrPos <= c->pos && !c->overflow;
+    for (k = g->fpscrPos; ok && k < c->pos; k++)
+    {
+        u32 p = c->buf[k] >> 26;
+        if (p != 59 && p != 63 && p != 48 && p != 50 && p != 52 && p != 54) ok = 0;
+    }
+    if (!ok) ppc_lwz(c, 3, OFF_FPSCR, R_CTX);
+    ppc_xoris(c, 3, 3, bits >> 16);
+    ppc_stw(c, 3, OFF_FPSCR, R_CTX);
+    g->fpscrValid = 1;
+    g->fpscrPos = c->pos;
+}
+
 static int emit_fpu(Gen *g, u16 op)
 {
     PpcCode *c = g->c;
@@ -2102,6 +2256,14 @@ static int emit_fpu(Gen *g, u16 op)
         case 0x2:
         {
             u32 d = fdef(g, n);
+            if ((g->prev & 0xF0FF) == 0x405A && (g->prev2 & 0xF00F) == 0x600C &&
+                ((g->prev2 >> 8) & 15) == ((g->prev >> 8) & 15))
+            {
+                ppc_load_ptr_const(c, 3, ppc_addr_of(s_byteFloat));
+                ppc_rlwinm(c, 4, get(g, (g->prev >> 8) & 15), 2, 22, 29);
+                ppc_lfsx(c, d, 3, 4);
+                return 1;
+            }
             if ((g->prev & 0xF0FF) == 0x405A) ppc_extsw(c, 3, get(g, (g->prev >> 8) & 15));
             else
             {
@@ -2127,9 +2289,7 @@ static int emit_fpu(Gen *g, u16 op)
             }
             if (op == 0xF3FD)
             {
-                ppc_lwz(c, 3, OFF_FPSCR, R_CTX);
-                ppc_xoris(c, 3, 3, FPSCR_SZ >> 16);
-                ppc_stw(c, 3, OFF_FPSCR, R_CTX);
+                fpscr_flip(g, FPSCR_SZ);
                 g->fp ^= FPSCR_SZ;
                 return 1;
             }
@@ -2216,6 +2376,22 @@ static void emit_andi(PpcCode *c, u32 ra, u32 rs, u32 imm)
     else ppc_andi_(c, ra, rs, imm);
 }
 
+static int stack_store(u16 op)
+{
+    u32 n = (op >> 8) & 15, lo = op & 15, low8 = op & 0xFF;
+    switch (op >> 12)
+    {
+    case 0x1: return n == 15;
+    case 0x2: return n == 15 && (lo <= 2 || (lo >= 4 && lo <= 6));
+    case 0x4:
+        return n == 15 && (low8 == 0x02 || low8 == 0x12 || low8 == 0x22 || low8 == 0x52 || low8 == 0x62 || low8 == 0x03 ||
+                           low8 == 0x13 || low8 == 0x23 || low8 == 0x33 || low8 == 0x43);
+    case 0x8: return ((op >> 8) == 0x80 || (op >> 8) == 0x81) && ((op >> 4) & 15) == 15;
+    case 0xF: return n == 15 && (lo == 0xA || lo == 0xB);
+    }
+    return 0;
+}
+
 static int emit_native(Gen *g, u16 op)
 {
     PpcCode *c = g->c;
@@ -2234,11 +2410,14 @@ static int emit_native(Gen *g, u16 op)
 
     if (op == 0xFBFD && g->fp != FP_UNKNOWN && !(g->fp & FPSCR_PR))
     {
-        u32 k;
-        for (k = 0; k < 16; k++) fflush(g, k);
-        ppc_li32(c, 3, op);
-        call_c(c, (const void *)g_sh4_ops[op]);
-        for (k = 0; k < 16; k++) fdrop(g, k);
+        u32 k, b;
+        for (b = 0; b < 16; b += 8)
+        {
+            for (k = 0; k < 8; k++) ppc_lfs(c, k, OFF_XF(b + k), R_CTX);
+            for (k = 0; k < 8; k++) ppc_stfs(c, fget(g, b + k), OFF_XF(b + k), R_CTX);
+            for (k = 0; k < 8; k++) ppc_fmr(c, fdef(g, b + k), k);
+        }
+        fpscr_flip(g, FPSCR_FR);
         return 1;
     }
     if ((op & 0xF1FF) == 0xF0FD && g->fp != FP_UNKNOWN && !(g->fp & FPSCR_PR))
@@ -2254,7 +2433,7 @@ static int emit_native(Gen *g, u16 op)
     switch (op >> 12)
     {
     case 0x0:
-        if (op == 0x0009) return 1;
+        if (op == 0x0009 || op == 0x0000) return 1;
         if (op == 0x0008) { ppc_li(c, defT(g), 0); return 1; }
         if (op == 0x0018) { ppc_li(c, defT(g), 1); return 1; }
         if (op == 0x0019)
@@ -2385,6 +2564,7 @@ static int emit_native(Gen *g, u16 op)
             }
             ppc_addi(c, rw(g, n), H(n), -size);
             ppc_mr(c, 3, H(n));
+            sq_hint(g, n);
             oc_hint(g, n);
             emit_store(g, 7, size);
             return 1;
@@ -2398,7 +2578,19 @@ static int emit_native(Gen *g, u16 op)
             ppc_stw(c, 5, OFF_SR, R_CTX);
             ppc_xor(c, defT(g), 3, 4);
             return 1;
-        case 0x8: ppc_and(c, 5, get(g, n), get(g, m)); t_is_zero(g, 5); return 1;
+        case 0x8:
+            if (t_pend_ok(g))
+            {
+                if (n == m) ppc_cmpwi(c, T_CR, get(g, n), 0);
+                else
+                {
+                    ppc_and(c, 5, get(g, n), get(g, m));
+                    ppc_cmpwi(c, T_CR, 5, 0);
+                }
+                t_pend(g, PPC_EQ, 1);
+                return 1;
+            }
+            ppc_and(c, 5, get(g, n), get(g, m)); t_is_zero(g, 5); return 1;
         case 0x9: rn = rw(g, n); ppc_and(c, rn, rn, get(g, m)); return 1;
         case 0xA: rn = rw(g, n); ppc_xor(c, rn, rn, get(g, m)); return 1;
         case 0xB: rn = rw(g, n); ppc_or(c, rn, rn, get(g, m)); return 1;
@@ -2424,11 +2616,25 @@ static int emit_native(Gen *g, u16 op)
     case 0x3:
         switch (op & 15)
         {
-        case 0x0: ppc_xor(c, 5, get(g, n), get(g, m)); t_is_zero(g, 5); return 1;
-        case 0x2: t_less(g, get(g, n), get(g, m), 0); ppc_xori(c, R_T, R_T, 1); return 1;
-        case 0x3: t_less(g, get(g, n), get(g, m), 1); ppc_xori(c, R_T, R_T, 1); return 1;
-        case 0x6: t_less(g, get(g, m), get(g, n), 0); return 1;
-        case 0x7: t_less(g, get(g, m), get(g, n), 1); return 1;
+        case 0x0: case 0x2: case 0x3: case 0x6: case 0x7:
+            if (t_pend_ok(g))
+            {
+                u32 lo = op & 15, a = get(g, n), b = get(g, m);
+                if (lo == 0x2 || lo == 0x6) ppc_cmplw(c, T_CR, a, b);
+                else ppc_cmpw(c, T_CR, a, b);
+                if (lo == 0x0) t_pend(g, PPC_EQ, 1);
+                else if (lo == 0x2 || lo == 0x3) t_pend(g, PPC_LT, 0);
+                else t_pend(g, PPC_GT, 1);
+                return 1;
+            }
+            switch (op & 15)
+            {
+            case 0x0: ppc_xor(c, 5, get(g, n), get(g, m)); t_is_zero(g, 5); return 1;
+            case 0x2: t_less(g, get(g, n), get(g, m), 0); ppc_xori(c, R_T, R_T, 1); return 1;
+            case 0x3: t_less(g, get(g, n), get(g, m), 1); ppc_xori(c, R_T, R_T, 1); return 1;
+            case 0x6: t_less(g, get(g, m), get(g, n), 0); return 1;
+            default: t_less(g, get(g, m), get(g, n), 1); return 1;
+            }
         case 0x4: emit_div1(g, n, m); return 1;
         case 0x8: rn = rw(g, n); ppc_subf(c, rn, get(g, m), rn); return 1;
         case 0xA: emit_addc_subc(g, n, m, 1); return 1;
@@ -2508,13 +2714,31 @@ static int emit_native(Gen *g, u16 op)
         case 0x10:
             rn = rw(g, n);
             ppc_addi(c, rn, rn, -1);
+            if (t_pend_ok(g))
+            {
+                ppc_cmpwi(c, T_CR, rn, 0);
+                t_pend(g, PPC_EQ, 1);
+                return 1;
+            }
             t_is_zero(g, rn);
             return 1;
         case 0x11:
+            if (t_pend_ok(g))
+            {
+                ppc_cmpwi(c, T_CR, get(g, n), 0);
+                t_pend(g, PPC_LT, 0);
+                return 1;
+            }
             ppc_rlwinm(c, 3, get(g, n), 1, 31, 31);
             ppc_xori(c, defT(g), 3, 1);
             return 1;
         case 0x15:
+            if (t_pend_ok(g))
+            {
+                ppc_cmpwi(c, T_CR, get(g, n), 0);
+                t_pend(g, PPC_GT, 1);
+                return 1;
+            }
             ppc_li(c, 6, 0);
             t_less(g, 6, get(g, n), 1);
             return 1;
@@ -2590,6 +2814,12 @@ static int emit_native(Gen *g, u16 op)
         case 0x4: ppc_addi(c, 3, get(g, m), op & 15); emit_load(g, def(g, 0), 1); return 1;
         case 0x5: ppc_addi(c, 3, get(g, m), (op & 15) * 2); emit_load(g, def(g, 0), 2); return 1;
         case 0x8:
+            if (t_pend_ok(g))
+            {
+                ppc_cmpwi(c, T_CR, get(g, 0), imm8);
+                t_pend(g, PPC_EQ, 1);
+                return 1;
+            }
             ppc_li32(c, 5, (u32)imm8);
             ppc_xor(c, 5, get(g, 0), 5);
             t_is_zero(g, 5);
@@ -2617,7 +2847,16 @@ static int emit_native(Gen *g, u16 op)
             return 1;
         }
         case 0x7: def_const(g, 0, ((g->pc + 4) & ~3u) + (op & 0xFF) * 4); return 1;
-        case 0x8: emit_andi(c, 5, get(g, 0), op & 0xFF); t_is_zero(g, 5); return 1;
+        case 0x8:
+            emit_andi(c, 5, get(g, 0), op & 0xFF);
+            if (t_pend_ok(g))
+            {
+                ppc_cmpwi(c, T_CR, 5, 0);
+                t_pend(g, PPC_EQ, 1);
+                return 1;
+            }
+            t_is_zero(g, 5);
+            return 1;
         case 0x9: rn = rw(g, 0); emit_andi(c, rn, rn, op & 0xFF); return 1;
         case 0xA: rn = rw(g, 0); ppc_xori(c, rn, rn, op & 0xFF); return 1;
         case 0xB: rn = rw(g, 0); ppc_ori(c, rn, rn, op & 0xFF); return 1;
@@ -2662,9 +2901,37 @@ static void fd_check(Gen *g, u16 op)
     g->fdOk = 1;
 }
 
+static void hint_value(Gen *g, u32 n, u32 addr)
+{
+    u32 bit = 1u << n, v;
+    g->sqRegs &= ~bit;
+    g->ocRegs &= ~bit;
+    if (((addr >> 26) & 7) != 3) return;
+    v = buf_r32(g_ram, addr & (RAM_SIZE - 1) & ~3u);
+    if ((v >> 26) == 0x38) g->sqRegs |= bit;
+    else if ((v >> 26) == 0x1F && sh4_ocram_simple()) g->ocRegs |= bit;
+}
+
+static void hint_track(Gen *g, u16 op)
+{
+    u32 n = (op >> 8) & 15, m = (op >> 4) & 15;
+    if (g->info->mmu) return;
+    if ((op & 0xF00F) == 0x6003)
+    {
+        g->sqRegs = (g->sqRegs & ~(1u << n)) | (((g->sqRegs >> m) & 1) << n);
+        g->ocRegs = (g->ocRegs & ~(1u << n)) | (((g->ocRegs >> m) & 1) << n);
+    }
+    else if ((op & 0xF000) == 0xD000)
+        hint_value(g, n, ((g->pc + 4) & ~3u) + (op & 0xFF) * 4);
+    else if ((op & 0xFF00) == 0xC600)
+        hint_value(g, 0, g_sh4.gbr + (op & 0xFF) * 4);
+}
+
 static void op_done(Gen *g, u16 op)
 {
+    g->prev2 = g->prev;
     g->prev = op;
+    hint_track(g, op);
 }
 
 static void emit_slot(Gen *g, u32 addr)
@@ -2759,7 +3026,14 @@ static void emit_skip(Gen *g, u16 op, u32 index)
     PpcCode *c = g->c;
     u32 top = op >> 8, slot = g->pc + 2, n;
     s32 back = (s32)(op & 0xFF);
-    if (top == 0x89 || top == 0x8B)
+    int w = top == 0x89 || top == 0x8D;
+    int pend = g->tPend && (top == 0x89 || top == 0x8B || slot_keeps_t(code_at(g, slot)));
+    if (pend)
+    {
+        if (top == 0x8D || top == 0x8F) emit_slot(g, slot);
+        t_pend_li(g, w);
+    }
+    else if (top == 0x89 || top == 0x8B)
         ppc_cmpwi(c, 0, getT(g), 0);
     else if (slot_keeps_t(code_at(g, slot)))
     {
@@ -2783,7 +3057,14 @@ static void emit_skip(Gen *g, u16 op, u32 index)
     g->skip.marked = g->marked;
     g->skip.fdOk = g->fdOk;
     g->skip.index = index;
-    g->skip.at = ppc_bc_fwd(c, (top == 0x89 || top == 0x8D) ? 4 : 12, 0, PPC_EQ);
+    if (pend)
+    {
+        g->skip.at = t_pend_bc(g, w);
+        g->tPend = 0;
+        t_pend_li(g, !w);
+    }
+    else
+        g->skip.at = ppc_bc_fwd(c, (top == 0x89 || top == 0x8D) ? 4 : 12, 0, PPC_EQ);
     g->skip.active = 1;
     if (back) cycles_add(g, -back);
 }
@@ -2840,6 +3121,7 @@ static void skip_join(Gen *g)
     g->srInR5 = 0;
     g->sqHint = 0;
     g->ocHint = 0;
+    g->fpscrValid = 0;
     fwd_clear(g);
     g->skip.active = 0;
 }
@@ -2848,6 +3130,27 @@ static void emit_side_exit(Gen *g, u16 op, s32 rest)
 {
     PpcCode *c = g->c;
     u32 top = op >> 8, target = g->pc + 4 + disp8(op), slot = g->pc + 2, notTaken;
+    if (g->tPend && (top == 0x89 || top == 0x8B || slot_keeps_t(code_at(g, slot))))
+    {
+        int w = top == 0x89 || top == 0x8D;
+        s32 more = (top == 0x89 || top == 0x8B) ? rest - 1 : rest;
+        if (top == 0x8D || top == 0x8F) emit_slot(g, slot);
+        t_pend_li(g, w);
+        if (add_side_exit(g, target, more))
+        {
+            add_side_cold(g, t_pend_bc(g, w));
+            g->tPend = 0;
+            t_pend_li(g, !w);
+            return;
+        }
+        notTaken = t_pend_bc(g, !w);
+        g->tPend = 0;
+        cycles_add(g, more);
+        exit_to(g, target);
+        ppc_patch_here(c, notTaken);
+        t_pend_li(g, !w);
+        return;
+    }
     if (top == 0x89 || top == 0x8B)
     {
         ppc_cmpwi(c, 0, getT(g), 0);
@@ -2969,8 +3272,16 @@ static int emit_branch(Gen *g, u16 op)
     if (top == 0x89 || top == 0x8B)
     {
         u32 target = pc + 4 + disp8(op);
-        ppc_cmpwi(c, 0, getT(g), 0);
-        at = ppc_bc_fwd(c, top == 0x89 ? 4 : 12, 0, PPC_EQ);
+        if (g->tPend)
+        {
+            at = t_pend_branch(g, top == 0x89);
+            t_pend_li(g, top != 0x89);
+        }
+        else
+        {
+            ppc_cmpwi(c, 0, getT(g), 0);
+            at = ppc_bc_fwd(c, top == 0x89 ? 4 : 12, 0, PPC_EQ);
+        }
         exit_to(g, next);
         ppc_patch_here(c, at);
         cycles_add(g, -1);
@@ -2980,19 +3291,28 @@ static int emit_branch(Gen *g, u16 op)
     if (top == 0x8D || top == 0x8F)
     {
         u32 target = pc + 4 + disp8(op);
-        if (slot_keeps_t(code_at(g, slot)))
+        if (g->tPend && slot_keeps_t(code_at(g, slot)))
         {
             emit_slot(g, slot);
-            ppc_cmpwi(c, 0, getT(g), 0);
+            at = t_pend_branch(g, top == 0x8D);
+            t_pend_li(g, top != 0x8D);
         }
         else
         {
-            ppc_stw(c, getT(g), OFF_TEMP(0), R_CTX);
-            emit_slot(g, slot);
-            ppc_lwz(c, 3, OFF_TEMP(0), R_CTX);
-            ppc_cmpwi(c, 0, 3, 0);
+            if (slot_keeps_t(code_at(g, slot)))
+            {
+                emit_slot(g, slot);
+                ppc_cmpwi(c, 0, getT(g), 0);
+            }
+            else
+            {
+                ppc_stw(c, getT(g), OFF_TEMP(0), R_CTX);
+                emit_slot(g, slot);
+                ppc_lwz(c, 3, OFF_TEMP(0), R_CTX);
+                ppc_cmpwi(c, 0, 3, 0);
+            }
+            at = ppc_bc_fwd(c, top == 0x8D ? 4 : 12, 0, PPC_EQ);
         }
-        at = ppc_bc_fwd(c, top == 0x8D ? 4 : 12, 0, PPC_EQ);
         exit_to(g, after);
         ppc_patch_here(c, at);
         exit_or_loop(g, target);
@@ -3080,6 +3400,11 @@ u32 sh4_jit_gen_block(PpcCode *c, u32 pc, const u32 *ops, u32 n, int endsWithBra
     u32 i;
     s32 cycles = (s32)n;
     memset(&g, 0, sizeof(g));
+    g.endPc = pc + n * 2;
+    {
+        u32 sp = g_sh4.r[15] & (RAM_SIZE - 1), at = pc & (RAM_SIZE - 1);
+        g.stackFar = !info->mmu && (g_sh4.r[15] & 0x1C000000u) == 0x0C000000u && (sp > at ? sp - at : at - sp) >= 0x10000u;
+    }
     memset(g.reg, RS_CLEAN, sizeof(g.reg));
     memset(g.fr, RS_CLEAN, sizeof(g.fr));
     g.t = RS_CLEAN;
@@ -3092,6 +3417,8 @@ u32 sh4_jit_gen_block(PpcCode *c, u32 pc, const u32 *ops, u32 n, int endsWithBra
     if (info->initDirty & (1u << 16)) g.t = RS_DIRTY;
     g.c = c;
     g.info = info;
+    g.sqRegs = info->sqRegs;
+    g.ocRegs = info->ocRegs;
     g.coldPos = info->coldPos;
     g.coldCap = info->coldCap;
     g.fp = info->fpMode;
@@ -3153,6 +3480,7 @@ u32 sh4_jit_gen_block(PpcCode *c, u32 pc, const u32 *ops, u32 n, int endsWithBra
             return 1;
         }
         fd_check(&g, op);
+        int wroteBefore = g.wrote;
         if (!emit_native(&g, op))
         {
             if ((op & 0xF0FF) == 0x400E)
@@ -3168,6 +3496,7 @@ u32 sh4_jit_gen_block(PpcCode *c, u32 pc, const u32 *ops, u32 n, int endsWithBra
                 track_fpscr(&g, op);
             }
         }
+        if (g.stackFar && stack_store(op)) g.wrote = wroteBefore;
         op_done(&g, op);
     }
     exit_to(&g, pc + n * 2);

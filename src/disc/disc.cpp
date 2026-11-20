@@ -429,8 +429,173 @@ static Disc *open_chd(const char *path)
     return d;
 }
 
+#define CDI_V2  0x80000004u
+#define CDI_V3  0x80000005u
+#define CDI_V35 0x80000006u
+
+struct CdiIn
+{
+    FILE *f;
+    int bad;
+};
+
+static u32 cdi_u32(CdiIn *in)
+{
+    u8 b[4];
+    if (fread(b, 1, 4, in->f) != 4) { in->bad = 1; return 0; }
+    return (u32)b[0] | (u32)b[1] << 8 | (u32)b[2] << 16 | (u32)b[3] << 24;
+}
+
+static u32 cdi_u16(CdiIn *in)
+{
+    u8 b[2];
+    if (fread(b, 1, 2, in->f) != 2) { in->bad = 1; return 0; }
+    return (u32)b[0] | (u32)b[1] << 8;
+}
+
+static u32 cdi_u8(CdiIn *in)
+{
+    u8 b;
+    if (fread(&b, 1, 1, in->f) != 1) { in->bad = 1; return 0; }
+    return b;
+}
+
+static void cdi_skip(CdiIn *in, long n)
+{
+    if (fseek(in->f, n, SEEK_CUR) != 0) in->bad = 1;
+}
+
+static int cdi_track(CdiIn *in, u32 version, u32 *pregap, u32 *length, u32 *mode, u32 *startLba, u32 *totalLength,
+                     u32 *sectorSize)
+{
+    static const u8 mark[10] = { 0, 0, 0x01, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF };
+    u8 got[10];
+    int i;
+    if (cdi_u32(in) != 0) cdi_skip(in, 8);
+    for (i = 0; i < 2; i++)
+        if (fread(got, 1, 10, in->f) != 10 || memcmp(got, mark, 10)) return -1;
+    cdi_skip(in, 4);
+    cdi_skip(in, (long)cdi_u8(in));
+    cdi_skip(in, 11 + 4 + 4);
+    if (cdi_u32(in) == 0x80000000u) cdi_skip(in, 8);
+    cdi_skip(in, 2);
+    *pregap = cdi_u32(in);
+    *length = cdi_u32(in);
+    cdi_skip(in, 6);
+    *mode = cdi_u32(in);
+    cdi_skip(in, 12);
+    *startLba = cdi_u32(in);
+    *totalLength = cdi_u32(in);
+    cdi_skip(in, 16);
+    switch (cdi_u32(in))
+    {
+    case 0: *sectorSize = 2048; break;
+    case 1: *sectorSize = 2336; break;
+    case 2: *sectorSize = 2352; break;
+    case 4: *sectorSize = 2448; break;
+    default: return -1;
+    }
+    cdi_skip(in, 29);
+    if (version != CDI_V2)
+    {
+        cdi_skip(in, 5);
+        if (cdi_u32(in) == 0xFFFFFFFFu) cdi_skip(in, 78);
+    }
+    return in->bad ? -1 : 0;
+}
+
+int disc_parse_cdi(Disc *d, FILE *f, u64 size, const char *path)
+{
+    CdiIn in = { f, 0 };
+    u32 version, offset, sessions, s;
+    u64 header, pos = 0;
+    int mode2 = 0;
+    memset(d, 0, sizeof(*d));
+    if (size < 16 || size > 0x7FFFFFFFu || fseek(f, (long)(size - 8), SEEK_SET) != 0) return -1;
+    version = cdi_u32(&in);
+    offset = cdi_u32(&in);
+    if (in.bad || (version != CDI_V2 && version != CDI_V3 && version != CDI_V35) || offset == 0) return -1;
+    header = version == CDI_V35 ? size - offset : offset;
+    if (header >= size - 8 || fseek(f, (long)header, SEEK_SET) != 0) return -1;
+    sessions = cdi_u16(&in);
+    if (in.bad || sessions == 0 || sessions > DISC_MAX_SESSIONS) return -1;
+    for (s = 0; s < sessions; s++)
+    {
+        u32 tracks = cdi_u16(&in), k;
+        if (in.bad || d->trackCount + tracks > DISC_MAX_TRACKS) return -1;
+        for (k = 0; k < tracks; k++)
+        {
+            DiscTrack *t = &d->tracks[d->trackCount];
+            u32 pregap, length, mode, startLba, total, sectorSize, stride;
+            if (cdi_track(&in, version, &pregap, &length, &mode, &startLba, &total, &sectorSize) != 0 || mode > 2 ||
+                length == 0 || length > 0x100000u || pregap > 0x100000u)
+                return -1;
+            stride = sectorSize;
+            t->number = d->trackCount + 1;
+            t->ctrl = mode == 0 ? 0 : 4;
+            t->sectorSize = sectorSize == 2448 ? 2352 : sectorSize;
+            t->sectorStride = stride;
+            t->startFad = startLba + pregap;
+            t->endFad = t->startFad + length - 1;
+            t->fileOffset = pos + (u64)pregap * stride;
+            strncpy(t->path, path, sizeof(t->path) - 1);
+            if (t->fileOffset + (u64)length * stride > header)
+                LOG_WARN("[disc] CDI track %u goes past the track data (truncated image?)", t->number);
+            if (total < pregap + length)
+                LOG_WARN("[disc] CDI track %u: %u frames stored for %u + %u", t->number, total, pregap, length);
+            if (k == 0) d->sessionFirstTrack[d->sessionCount++] = (u8)t->number;
+            if (mode == 2) mode2 = 1;
+            pos += (u64)total * stride;
+            d->trackCount++;
+        }
+        cdi_skip(&in, version == CDI_V2 ? 12 : 13);
+        if (in.bad) return -1;
+    }
+    if (d->trackCount == 0) return -1;
+    d->type = mode2 ? DISC_CDROM_XA : DISC_CDROM;
+    d->leadOutFad = d->tracks[d->trackCount - 1].endFad + 1;
+    return 0;
+}
+
+static Disc *open_cdi(const char *path)
+{
+    Disc *d = (Disc *)calloc(1, sizeof(Disc));
+    FILE *f = fopen(path, "rb");
+    u32 i;
+    if (!d || !f)
+    {
+        LOG_ERROR("[disc] cannot open %s", path);
+        if (f) fclose(f);
+        free(d);
+        return NULL;
+    }
+    if (disc_parse_cdi(d, f, file_size(f), path) != 0)
+    {
+        LOG_ERROR("[disc] %s: not a valid CDI image", path);
+        fclose(f);
+        free(d);
+        return NULL;
+    }
+    for (i = 0; i < d->trackCount; i++)
+    {
+        DiscTrack *t = &d->tracks[i];
+        t->file = i == 0 ? f : fopen(path, "rb");
+        if (!t->file)
+        {
+            LOG_ERROR("[disc] cannot open %s", path);
+            disc_close(d);
+            return NULL;
+        }
+        LOG_INFO("[disc] track %u: FAD %u-%u, %s, %u-byte sectors", t->number, t->startFad, t->endFad,
+                 t->ctrl & 4 ? "data" : "audio", t->sectorStride);
+    }
+    LOG_INFO("[disc] CDI image, %u sessions, %u tracks", d->sessionCount, d->trackCount);
+    return d;
+}
+
 Disc *disc_open(const char *path)
 {
+    if (has_ext(path, ".cdi")) return open_cdi(path);
     if (has_ext(path, ".gdi")) return open_gdi(path);
     if (has_ext(path, ".iso")) return open_iso(path);
     if (has_ext(path, ".cue")) return open_cue(path);
@@ -494,7 +659,8 @@ u32 disc_read(Disc *d, u32 fad, u32 count, u8 *out, u32 format)
                 }
             }
         }
-        else if (fseek(t->file, (long)(t->fileOffset + (u64)(fad - t->startFad) * t->sectorSize), SEEK_SET) != 0 ||
+        else if (fseek(t->file, (long)(t->fileOffset + (u64)(fad - t->startFad) * (t->sectorStride ? t->sectorStride : t->sectorSize)),
+                       SEEK_SET) != 0 ||
                  fread(raw, 1, t->sectorSize, t->file) != t->sectorSize)
         {
             memset(dst, 0, format);

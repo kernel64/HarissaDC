@@ -103,6 +103,7 @@ enum Sh4Irq
 void sh4_irq_set(int irq, int pending);
 extern u32 g_sh4_irq_counts[64];
 void sh4_irq_update(void);
+void sh4_irq_reset(void);
 int sh4_irq_check(void);
 
 void sh4_exception(u32 expevt, u32 pc);

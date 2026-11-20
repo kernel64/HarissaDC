@@ -18,7 +18,9 @@
 #include "../../disc/game_files.h"
 #include "../../hw/aica.h"
 #include "../../hw/arm7_jit.h"
+#include "../../hw/cheat.h"
 #include "../../hw/dreamcast.h"
+#include "../../hw/flash.h"
 #include "../../hw/gdrom.h"
 #include "../../hw/maple.h"
 #include "../../hw/pvr.h"
@@ -30,6 +32,7 @@
 #include "../../sh4/sh4_jit.h"
 #include "../../sh4/sh4_mmr.h"
 #include "../../sh4/sh4_mmu.h"
+#include "xb_ach.h"
 #include "xb_audio.h"
 #include "xb_codemem.h"
 #include "xb_diag.h"
@@ -40,11 +43,51 @@
 #include "xb_menu.h"
 #include "xb_pad.h"
 #include "xb_pvr.h"
+#include "xb_ra.h"
 #include "xb_sampler.h"
 #include "xb_ui.h"
-#ifdef EMU_TRACE
 extern "C" LONG NTAPI XexGetModuleHandle(PCSTR name, PHANDLE handle);
 extern "C" LONG NTAPI XexGetProcedureAddress(HANDLE module, DWORD ordinal, PVOID *address);
+
+static HANDLE s_probe;
+static volatile LONG s_probeDone;
+
+static DWORD WINAPI fault_probe(LPVOID)
+{
+    volatile u32 *p = (volatile u32 *)(g_mem_window ? g_mem_window + 0x005F74E4u : (u8 *)0x10);
+    __try
+    {
+        *p = 0;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+    s_probeDone = 1;
+    return 0;
+}
+
+static int debugger_takes_faults(void)
+{
+    int i;
+    if (s_probe) ResumeThread(s_probe);
+    else
+    {
+        s_probeDone = 0;
+        s_probe = CreateThread(NULL, 0, fault_probe, NULL, 0, NULL);
+        if (!s_probe) return 0;
+    }
+    for (i = 0; i < 30 && !s_probeDone; i++) Sleep(10);
+    if (s_probeDone)
+    {
+        CloseHandle(s_probe);
+        s_probe = NULL;
+        return 0;
+    }
+    SuspendThread(s_probe);
+    return 1;
+}
+
+#ifdef EMU_TRACE
 typedef BOOL (*TraceStartFn)(const char *file);
 typedef BOOL (*TraceStopFn)(void);
 
@@ -112,7 +155,9 @@ static void pad_from_xinput(const XINPUT_GAMEPAD *g, MaplePad *p, const Config *
     const u32 *map = cfg->padMap[player];
     static const u16 dcButton[PADIN_COUNT] = { DC_BTN_A, DC_BTN_B, DC_BTN_X, DC_BTN_Y, DC_BTN_START, 0, 0,
                                                DC_BTN_UP, DC_BTN_DOWN, DC_BTN_LEFT, DC_BTN_RIGHT };
-    SHORT sx = cfg->padStick[player] ? g->sThumbRX : g->sThumbLX, sy = cfg->padStick[player] ? g->sThumbRY : g->sThumbLY;
+    int stick = cfg->padStick[player];
+    SHORT sx = stick == PAD_STICK_RIGHT ? g->sThumbRX : stick == PAD_STICK_NONE ? 0 : g->sThumbLX;
+    SHORT sy = stick == PAD_STICK_RIGHT ? g->sThumbRY : stick == PAD_STICK_NONE ? 0 : g->sThumbLY;
     float fx = sx / 32767.0f, fy = sy / 32767.0f, mag = sqrtf(fx * fx + fy * fy), dead = cfg->padDead[player] / 100.0f;
     int x, y, in;
     if (mag <= dead || dead >= 1.0f)
@@ -142,6 +187,29 @@ static struct { u32 pc, n; } s_disp[4096];
 static void jitmap_line(void *ctx, const u32 *code, u32 words, u32 pc, u32 off, u32 mode)
 {
     fprintf((FILE *)ctx, "%08X %u %08X %08X %X\n", (u32)(uintptr_t)code, words, pc, off, mode);
+}
+
+#define TRAIL 64
+static u32 s_trail[TRAIL], s_trailPr[TRAIL], s_trailPos;
+
+static void trail_record(u32 pc)
+{
+    s_trail[s_trailPos & (TRAIL - 1)] = pc;
+    s_trailPr[s_trailPos & (TRAIL - 1)] = g_sh4.pr;
+    s_trailPos++;
+}
+
+static void trail_dump(u32 pc)
+{
+    static int done;
+    u32 i;
+    if (done) return;
+    done = 1;
+    LOG_ERROR("[trail] illegal instruction at %08X: r0-r3 %08X %08X %08X %08X r13 %08X r14 %08X sr %08X fpscr %08X", pc, g_sh4.r[0],
+              g_sh4.r[1], g_sh4.r[2], g_sh4.r[3], g_sh4.r[13], g_sh4.r[14], g_sh4.sr, g_sh4.fpscr);
+    for (i = s_trailPos > TRAIL ? s_trailPos - TRAIL : 0; i < s_trailPos; i++)
+        LOG_ERROR("[trail] %u: pc %08X pr %08X", i, s_trail[i & (TRAIL - 1)], s_trailPr[i & (TRAIL - 1)]);
+    xb_log_flush();
 }
 
 static void dispatch_count(u32 pc)
@@ -224,7 +292,32 @@ static const char *const s_noTmuPollSkip[] = {
 
 static const char *const s_lateRenderWait[] = {
     "T0015M",
+    "T17716N",
 };
+
+static const char *const s_fbReadback[] = {
+    "T13002N",
+};
+
+static const char *const s_slowCpuWhenBehind[] = {
+    "T40203N",
+};
+
+static int slow_cpu_when_behind_of(const char *product)
+{
+    size_t k;
+    for (k = 0; k < sizeof(s_slowCpuWhenBehind) / sizeof(s_slowCpuWhenBehind[0]); k++)
+        if (!strcmp(product, s_slowCpuWhenBehind[k])) return 1;
+    return 0;
+}
+
+static int fb_readback_of(const char *product)
+{
+    size_t k;
+    for (k = 0; k < sizeof(s_fbReadback) / sizeof(s_fbReadback[0]); k++)
+        if (!strcmp(product, s_fbReadback[k])) return 1;
+    return 0;
+}
 
 static int late_render_wait_of(const char *product)
 {
@@ -239,6 +332,35 @@ static const char *const s_exactDepth[] = {
     "MK-51059",
     "HDR-0016",
 };
+
+static const char *const s_palShader[] = {
+    "6108099",
+    "T0002M",
+};
+
+static const struct
+{
+    const char *product;
+    int samples;
+} s_soundLag[] = {
+    { "6108099", 64 },
+};
+
+static int sound_lag_of(const char *product)
+{
+    size_t k;
+    for (k = 0; k < sizeof(s_soundLag) / sizeof(s_soundLag[0]); k++)
+        if (!strcmp(product, s_soundLag[k].product)) return s_soundLag[k].samples;
+    return 0;
+}
+
+static int pal_shader_of(const char *product)
+{
+    size_t k;
+    for (k = 0; k < sizeof(s_palShader) / sizeof(s_palShader[0]); k++)
+        if (!strcmp(product, s_palShader[k])) return 1;
+    return 0;
+}
 
 static int exact_depth_of(const char *product)
 {
@@ -261,6 +383,20 @@ static int no_tmu_poll_skip_of(const char *product)
 static int arcade_conversion(const char *product)
 {
     return strlen(product) == 6 && !strncmp(product, "T00", 3) && product[5] == 'M';
+}
+
+static const char *const s_mmuSqOnly[] = {
+    "T38706M",
+    "MK-51060",
+};
+
+static int mmu_sq_only_of(const char *product)
+{
+    size_t k;
+    if (arcade_conversion(product)) return 1;
+    for (k = 0; k < sizeof(s_mmuSqOnly) / sizeof(s_mmuSqOnly[0]); k++)
+        if (!strcmp(product, s_mmuSqOnly[k])) return 1;
+    return 0;
 }
 
 static int rotate_auto(const Config *c)
@@ -383,6 +519,29 @@ static IDirect3DTexture9 *upload(IDirect3DDevice9 *dev, int w, int h)
     return s_tex[i];
 }
 
+static void shown_resolution(char *out, int size, IDirect3DTexture9 *tex, const Config *cfg)
+{
+    int w = 0, h = 0, k;
+    f32 scale = 1.0f;
+    char sc[16];
+    int gpu = xb_pvr_display_size(tex, &w, &h, &scale);
+    if (!gpu)
+    {
+        u32 ctrl = pvr_reg(0x005F8044), fbSize = pvr_reg(0x005F805C), depth = (ctrl >> 2) & 3;
+        u32 bpp = depth == 2 ? 3 : depth == 3 ? 4 : 2, lines = ((fbSize >> 10) & 0x3FF) + 1;
+        if ((pvr_reg(0x005F80D0) >> 4) & 1) lines *= 2;
+        w = (int)(((fbSize & 0x3FF) + 1) * 4 / bpp);
+        h = (int)lines;
+        scale = 1.0f;
+    }
+    _snprintf(sc, sizeof(sc) - 1, "%.2f", scale);
+    sc[sizeof(sc) - 1] = 0;
+    for (k = (int)strlen(sc) - 1; k > 0 && sc[k] == '0'; k--) sc[k] = 0;
+    if (k > 0 && sc[k] == '.') sc[k] = 0;
+    _snprintf(out, size - 1, "%dx%d  " UI_CH_MIDDOT "  %sx%s", w, h, sc, gpu && cfg->widescreen ? "  16:9" : "");
+    out[size - 1] = 0;
+}
+
 static void draw_picture(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex, const Config *cfg)
 {
     u32 ctrl = pvr_reg(0x005F8044), size = pvr_reg(0x005F805C), depth = (ctrl >> 2) & 3;
@@ -424,6 +583,34 @@ static void message(IDirect3DDevice9 *dev, const char *title, const char *text)
     }
 }
 
+enum { DEBUGGER_BACK = -1, DEBUGGER_KEEP = 0, DEBUGGER_NO_FASTMEM = 1 };
+
+static int debugger_screen(IDirect3DDevice9 *dev)
+{
+    UiInput in;
+    xb_pvr_sync();
+    UiInputInit(&in);
+    for (;;)
+    {
+        static char wrapped[1024];
+        WORD down = UiInputPoll(&in);
+        if (down & XINPUT_GAMEPAD_A) return DEBUGGER_NO_FASTMEM;
+        if (down & XINPUT_GAMEPAD_X) return DEBUGGER_KEEP;
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) return DEBUGGER_BACK;
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
+        UiBegin(dev);
+        UiBackdrop();
+        UiBrand(UI_SAFE_X, 72, 34);
+        UiPanel(UI_SAFE_X, 140, UI_WIDTH - 2 * UI_SAFE_X, 300, 18);
+        UiText(UI_BOLD, 28, UI_SAFE_X + 40, 190, UI_COL_TEXT, Tr(T_DEBUGGER), UI_LEFT);
+        UiTextWrap(UI_REGULAR, 20, UI_WIDTH - 2 * UI_SAFE_X - 80, 8, Tr(T_DEBUGGER_TEXT), wrapped, sizeof(wrapped));
+        UiText(UI_REGULAR, 20, UI_SAFE_X + 40, 250, UI_COL_TEXT2, wrapped, UI_LEFT);
+        UiScreenFooter(Tr(T_FOOT_DEBUGGER));
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+    }
+}
+
 static int run_frame_guarded(char *crash, int crashSize)
 {
     __try
@@ -438,40 +625,99 @@ static int run_frame_guarded(char *crash, int crashSize)
     }
 }
 
-static const char *vmu_path(void)
-{
-    static char path[64];
-    return xb_fs_data_path(path, sizeof(path), "saves", "vmu_a1.bin");
-}
-#define VMU_PATH vmu_path()
+static char s_vmuPath[96];
 
-static void vmu_load(void)
+static void vmu_choose_card(const char *gameFolder, int shared)
+{
+    if (shared || !gameFolder || !gameFolder[0])
+        xb_fs_data_path(s_vmuPath, sizeof(s_vmuPath), "saves", "vmu_a1.bin");
+    else
+    {
+        char name[48], d[64];
+        _snprintf(name, sizeof(name), "%.38s.bin", gameFolder);
+        name[sizeof(name) - 1] = 0;
+        xb_fs_data_dir(d, sizeof(d), "saves");
+        xb_fs_data_path(s_vmuPath, sizeof(s_vmuPath), "saves\\vmu", name);
+    }
+}
+
+static int vmu_file_size(const char *path)
+{
+    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD size;
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    size = GetFileSize(h, NULL);
+    CloseHandle(h);
+    return (int)size;
+}
+
+static void vmu_load(const char *gameFolder, int shared)
 {
     static u8 data[VMU_SIZE];
-    HANDLE h = CreateFileA(VMU_PATH, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    char tmp[sizeof(s_vmuPath) + 4];
     DWORD got = 0;
-    if (h != INVALID_HANDLE_VALUE)
+    int size;
+    vmu_choose_card(gameFolder, shared);
+    _snprintf(tmp, sizeof(tmp), "%s.tmp", s_vmuPath);
+    tmp[sizeof(tmp) - 1] = 0;
+    size = vmu_file_size(s_vmuPath);
+    if (size < 0 && vmu_file_size(tmp) == VMU_SIZE)
     {
-        ReadFile(h, data, VMU_SIZE, &got, NULL);
-        CloseHandle(h);
+        MoveFileA(tmp, s_vmuPath);
+        size = vmu_file_size(s_vmuPath);
+    }
+    if (size >= 0 && size != VMU_SIZE)
+    {
+        char bad[sizeof(s_vmuPath) + 4];
+        _snprintf(bad, sizeof(bad), "%s.bad", s_vmuPath);
+        bad[sizeof(bad) - 1] = 0;
+        DeleteFileA(bad);
+        MoveFileA(s_vmuPath, bad);
+        LOG_WARN("[emu] VMU: %s is %d bytes, not %u: renamed %s", s_vmuPath, size, VMU_SIZE, bad);
+    }
+    else if (size == VMU_SIZE)
+    {
+        HANDLE h = CreateFileA(s_vmuPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            ReadFile(h, data, VMU_SIZE, &got, NULL);
+            CloseHandle(h);
+        }
     }
     maple_vmu_load(got == VMU_SIZE ? data : NULL);
-    LOG_INFO("[emu] VMU: %s", got == VMU_SIZE ? VMU_PATH : "new, formatted");
+    LOG_INFO("[emu] VMU: %s%s", s_vmuPath, got == VMU_SIZE ? "" : " (new, formatted)");
 }
 
 static void vmu_save(void)
 {
+    char tmp[sizeof(s_vmuPath) + 4];
     HANDLE h;
     DWORD put = 0;
-    h = CreateFileA(VMU_PATH, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (!s_vmuPath[0]) return;
+    _snprintf(tmp, sizeof(tmp), "%s.tmp", s_vmuPath);
+    tmp[sizeof(tmp) - 1] = 0;
+    h = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE)
     {
-        LOG_ERROR("[emu] cannot write %s", VMU_PATH);
+        LOG_ERROR("[emu] cannot write %s", tmp);
         return;
     }
     WriteFile(h, maple_vmu_image(), VMU_SIZE, &put, NULL);
+    FlushFileBuffers(h);
     CloseHandle(h);
-    LOG_INFO("[emu] VMU saved");
+    if (put != VMU_SIZE)
+    {
+        DeleteFileA(tmp);
+        LOG_ERROR("[emu] VMU: %u of %u bytes written (disk full?), %s kept", (unsigned)put, VMU_SIZE, s_vmuPath);
+        return;
+    }
+    DeleteFileA(s_vmuPath);
+    if (!MoveFileA(tmp, s_vmuPath))
+    {
+        LOG_ERROR("[emu] VMU: cannot rename %s", tmp);
+        return;
+    }
+    LOG_INFO("[emu] VMU saved: %s", s_vmuPath);
 }
 
 #define STATE_SLOTS 4
@@ -502,14 +748,6 @@ static int state_exists(const char *gameFolder, int slot)
     char path[96];
     state_path(gameFolder, slot, path, sizeof(path));
     return GetFileAttributesA(path) != (DWORD)-1;
-}
-
-static int state_any(const char *gameFolder)
-{
-    int s;
-    for (s = 1; s <= STATE_SLOTS; s++)
-        if (state_exists(gameFolder, s)) return 1;
-    return 0;
 }
 
 static int file_io(HANDLE h, u8 *p, u32 bytes, int write)
@@ -560,7 +798,12 @@ static int state_save(const char *gameFolder, int slot, int disc, char *error, i
         _snprintf(error, errorSize, Tr(T_STATE_CANNOT_WRITE), path);
         error[errorSize - 1] = 0;
     }
-    else LOG_INFO("[emu] state saved: %s (%u KB)", path, size >> 10);
+    else
+    {
+        LOG_INFO("[emu] state saved: %s (%u KB)", path, size >> 10);
+        XbRaStateSaved(path);
+        XbAchUnlock(XB_ACH_SAVE_STATE);
+    }
     return r;
 }
 
@@ -604,7 +847,11 @@ static int state_load(const char *gameFolder, int slot, int disc, char *error, i
         _snprintf(error, errorSize, "%s", Tr(T_STATE_DAMAGED));
         error[errorSize - 1] = 0;
     }
-    else LOG_INFO("[emu] state loaded: %s", path);
+    else
+    {
+        LOG_INFO("[emu] state loaded: %s", path);
+        XbRaStateLoaded(path);
+    }
     return r;
 }
 
@@ -622,7 +869,202 @@ static void osd(const char *fmt, ...)
     s_osdAt = GetTickCount();
 }
 
-enum { P_RESUME = 1, P_RESET, P_SAVE_STATE, P_LOAD_STATE, P_DISC, P_SETTINGS, P_ABOUT, P_LIST, P_QUIT };
+static CheatList *s_cheats;
+static int s_achOpen;
+
+static char *read_whole(const char *path, u32 *len)
+{
+    FILE *f = fopen(path, "rb");
+    char *data;
+    long n;
+    *len = 0;
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    data = n > 0 && n < (8 << 20) ? (char *)malloc((size_t)n) : NULL;
+    if (data && fread(data, 1, (size_t)n, f) != (size_t)n)
+    {
+        free(data);
+        data = NULL;
+    }
+    fclose(f);
+    if (data) *len = (u32)n;
+    return data;
+}
+
+static void cheats_load(const Config *c, const char *product, const char *gameFolder)
+{
+    char path[160], name[80];
+    char *text;
+    u32 len;
+    int db = 0, own = 0;
+    cheat_free(s_cheats);
+    s_cheats = cheat_new();
+    if (!s_cheats) return;
+    xb_fs_data_path(path, sizeof(path), "cheats", "dreamcast_cheats.txt");
+    text = read_whole(path, &len);
+    if (text)
+    {
+        db = cheat_load_db(s_cheats, text, len, product);
+        free(text);
+    }
+    if (gameFolder[0])
+    {
+        _snprintf(name, sizeof(name), "%s.cht", gameFolder);
+        name[sizeof(name) - 1] = 0;
+        xb_fs_data_path(path, sizeof(path), "cheats", name);
+        text = read_whole(path, &len);
+        if (text)
+        {
+            own += cheat_load_cht(s_cheats, text, len);
+            free(text);
+        }
+        _snprintf(name, sizeof(name), "%s.txt", gameFolder);
+        name[sizeof(name) - 1] = 0;
+        xb_fs_data_path(path, sizeof(path), "cheats", name);
+        text = read_whole(path, &len);
+        if (text)
+        {
+            own += cheat_load_codes(s_cheats, text, len);
+            free(text);
+        }
+    }
+    cheat_states_read(s_cheats, c->cheats);
+    if (c->cheatOn >= 0) cheat_enable(s_cheats, c->cheatOn, 1);
+    LOG_INFO("[cheat] %d cheats from the database, %d from the game's files (%s.cht/.txt), %d on", db, own, gameFolder,
+             cheat_active(s_cheats));
+}
+
+#define CHEAT_ROWS 10
+
+static void cheats_menu(IDirect3DDevice9 *dev, Config *cfg, const char *gameFolder, Screen *screen)
+{
+    UiMenu m;
+    UiInput in;
+    int n = cheat_count(s_cheats), sel = 0, changed = 0;
+    if (!n)
+    {
+        message(dev, Tr(T_CHEATS), Trf(T_CHEATS_NONE, gameFolder[0] ? gameFolder : "-"));
+        return;
+    }
+    UiInputInit(&in);
+    for (;;)
+    {
+        WORD down = UiInputPoll(&in);
+        int top = sel / CHEAT_ROWS * CHEAT_ROWS, i;
+        char title[96];
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) break;
+        if (down & XINPUT_GAMEPAD_DPAD_UP) sel = (sel + n - 1) % n;
+        if (down & XINPUT_GAMEPAD_DPAD_DOWN) sel = (sel + 1) % n;
+        if (down & XINPUT_GAMEPAD_LEFT_SHOULDER) sel = sel >= CHEAT_ROWS ? sel - CHEAT_ROWS : 0;
+        if (down & XINPUT_GAMEPAD_RIGHT_SHOULDER) sel = sel + CHEAT_ROWS < n ? sel + CHEAT_ROWS : n - 1;
+        if ((down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) && cheat_supported(s_cheats, sel))
+        {
+            cheat_enable(s_cheats, sel, !cheat_enabled(s_cheats, sel));
+            changed = 1;
+        }
+        top = sel / CHEAT_ROWS * CHEAT_ROWS;
+        _snprintf(title, sizeof(title), "%s  %d / %d", Tr(T_CHEATS), sel + 1, n);
+        title[sizeof(title) - 1] = 0;
+        UiMenuClear(&m, title, Tr(T_FOOT_CHEATS));
+        for (i = top; i < n && i < top + CHEAT_ROWS; i++)
+        {
+            char value[64], fit[96];
+            const char *v;
+            if (!cheat_supported(s_cheats, i)) v = Tr(T_CHEAT_UNSUPPORTED);
+            else
+            {
+                _snprintf(value, sizeof(value), "< %s >", Tr(cheat_enabled(s_cheats, i) ? T_ON : T_OFF));
+                value[sizeof(value) - 1] = 0;
+                v = value;
+            }
+            UiTextFit(UI_BOLD, 22, 660 - 88 - 30 - UiTextWidth(UI_BOLD, 21, v) - 60, cheat_name(s_cheats, i), fit, sizeof(fit));
+            UiMenuAdd(&m, i, fit, v);
+        }
+        m.sel = sel - top;
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+        UiBegin(dev);
+        frozen_game(screen);
+        UiMenuDraw(&m);
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+    }
+    if (changed)
+    {
+        char game[CONFIG_PATH_MAX];
+        cheat_states_write(s_cheats, cfg->cheats, sizeof(cfg->cheats));
+        if (gameFolder[0])
+        {
+            SettingsPaths(gameFolder, NULL, game, sizeof(game));
+            if (!SettingsSaveKey(game, "cheats", cfg->cheats)) LOG_WARN("[cheat] cannot write %s", game);
+        }
+        LOG_INFO("[cheat] %d on: %s", cheat_active(s_cheats), cfg->cheats);
+        if (cheat_active(s_cheats)) XbAchUnlock(XB_ACH_CHEAT);
+    }
+}
+
+static char s_achBadge[UI_MENU_MAX][24];
+static IDirect3DTexture9 *ach_icon(int row) { return row >= 0 && row < UI_MENU_MAX ? XbRaBadge(s_achBadge[row]) : NULL; }
+
+static void ach_menu(IDirect3DDevice9 *dev, const Config *cfg, Screen *screen)
+{
+    UiMenu m;
+    UiInput in;
+    int n = XbRaListBegin(), sel = 0;
+    if (!n)
+    {
+        XbRaListEnd();
+        UiNotify(Tr(!cfg->achievements ? T_RA_OFF_HINT : XbRaState() == XB_RA_IN ? T_RA_NONE : T_RA_NOT_CONNECTED), 4000, NULL);
+        return;
+    }
+    UiInputInit(&in);
+    for (;;)
+    {
+        WORD down = UiInputPoll(&in);
+        int top, i;
+        char title[96];
+        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) break;
+        if (down & XINPUT_GAMEPAD_DPAD_UP) sel = (sel + n - 1) % n;
+        if (down & XINPUT_GAMEPAD_DPAD_DOWN) sel = (sel + 1) % n;
+        if (down & XINPUT_GAMEPAD_LEFT_SHOULDER) sel = sel >= CHEAT_ROWS ? sel - CHEAT_ROWS : 0;
+        if (down & XINPUT_GAMEPAD_RIGHT_SHOULDER) sel = sel + CHEAT_ROWS < n ? sel + CHEAT_ROWS : n - 1;
+        if (down & XINPUT_GAMEPAD_A)
+        {
+            XbRaItem it;
+            XbRaListItem(sel, &it);
+            if (it.description[0]) UiNotify(it.description, 5000, it.badge);
+        }
+        top = sel / CHEAT_ROWS * CHEAT_ROWS;
+        _snprintf(title, sizeof(title), "%s  %d / %d", Tr(T_ACHIEVEMENTS), sel + 1, n);
+        title[sizeof(title) - 1] = 0;
+        UiMenuClear(&m, title, Tr(T_FOOT_ACH));
+        m.icon = ach_icon;
+        for (i = top; i < n && i < top + CHEAT_ROWS; i++)
+        {
+            XbRaItem it;
+            char value[32], fit[96];
+            XbRaListItem(i, &it);
+            strcpy(s_achBadge[i - top], it.badge);
+            if (it.unlocked) strcpy(value, Tr(T_RA_DONE));
+            else sprintf(value, "%d", it.points);
+            UiTextFit(UI_BOLD, 22, 660 - 88 - 30 - 48 - (UiTextWidth(UI_REGULAR, 21, value) + 16), it.title, fit, sizeof(fit));
+            UiMenuAdd(&m, i, fit, value);
+        }
+        m.sel = sel - top;
+        UiServicePump(dev);
+        dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+        UiBegin(dev);
+        frozen_game(screen);
+        UiMenuDraw(&m);
+        UiNotifyDraw();
+        UiEnd();
+        dev->Present(NULL, NULL, NULL, NULL);
+    }
+    XbRaListEnd();
+}
+
+enum { P_RESUME = 1, P_SAVE_STATE, P_LOAD_STATE, P_SLOT, P_DISC, P_CHEATS, P_ACH, P_SETTINGS, P_RESET, P_LIST, P_QUIT };
 enum { PAUSE_RESUME, PAUSE_RESET, PAUSE_LIST, PAUSE_QUIT, PAUSE_LOADED };
 
 static int disc_menu(IDirect3DDevice9 *dev, DiscSet *set, Screen *screen)
@@ -675,63 +1117,75 @@ static int disc_menu(IDirect3DDevice9 *dev, DiscSet *set, Screen *screen)
     }
 }
 
-static int slot_menu(IDirect3DDevice9 *dev, const char *gameFolder, int save, Screen *screen)
+static void pause_build(UiMenu *m, const char *gameFolder, const DiscSet *discs, int sel)
 {
-    UiMenu m;
-    UiInput in;
-    char label[96];
-    int s;
-    UiMenuClear(&m, Tr(save ? T_SAVE_STATE : T_LOAD_STATE), Tr(save ? T_FOOT_SAVE : T_FOOT_LOAD));
-    for (s = 1; s <= STATE_SLOTS; s++)
+    char value[96];
+    UiMenuClear(m, Tr(T_PAUSED), Tr(T_FOOT_PAUSED));
+    UiMenuAdd(m, P_RESUME, Tr(T_RESUME), NULL);
+    UiMenuAdd(m, P_SAVE_STATE, Tr(T_SAVE_STATE), NULL);
+    UiMenuAdd(m, P_LOAD_STATE, Tr(T_LOAD_STATE), state_exists(gameFolder, s_lastSlot) ? NULL : Tr(T_EMPTY));
+    _snprintf(value, sizeof(value), "< %d \xC2\xB7 %s >", s_lastSlot, Tr(state_exists(gameFolder, s_lastSlot) ? T_SAVED : T_EMPTY));
+    value[sizeof(value) - 1] = 0;
+    UiMenuAdd(m, P_SLOT, Tr(T_STATE_SLOT), value);
+    if (discs->count > 1)
     {
-        _snprintf(label, sizeof(label), Tr(T_SLOT_N), s);
-        label[sizeof(label) - 1] = 0;
-        UiMenuAdd(&m, s, label, Tr(state_exists(gameFolder, s) ? T_SAVED : T_EMPTY));
+        _snprintf(value, sizeof(value), Tr(T_DISC_OF), discs->current + 1, discs->count);
+        value[sizeof(value) - 1] = 0;
+        UiMenuAdd(m, P_DISC, Tr(T_CHANGE_DISC), value);
     }
-    m.sel = s_lastSlot - 1;
-    UiInputInit(&in);
-    for (;;)
+    if (cheat_active(s_cheats))
     {
-        WORD down = UiInputPoll(&in);
-        UiMenuNavigate(&m, down);
-        if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) return 0;
-        if (down & XINPUT_GAMEPAD_A) return UiMenuSelected(&m);
-        dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
-        UiBegin(dev);
-        frozen_game(screen);
-        UiMenuDraw(&m);
-        UiEnd();
-        dev->Present(NULL, NULL, NULL, NULL);
+        _snprintf(value, sizeof(value), Tr(T_CHEATS_ON), cheat_active(s_cheats));
+        value[sizeof(value) - 1] = 0;
     }
+    UiMenuAdd(m, P_CHEATS, Tr(T_CHEATS), cheat_active(s_cheats) ? value : NULL);
+    {
+        int done, total;
+        XbRaProgress(&done, &total);
+        if (total)
+        {
+            _snprintf(value, sizeof(value), "%d / %d", done, total);
+            value[sizeof(value) - 1] = 0;
+        }
+        UiMenuAdd(m, P_ACH, Tr(T_ACHIEVEMENTS), total ? value : NULL);
+    }
+    UiMenuAdd(m, P_SETTINGS, Tr(T_SETTINGS), NULL);
+    UiMenuAdd(m, P_RESET, Tr(T_RESET_GAME), NULL);
+    UiMenuAdd(m, P_LIST, Tr(T_BACK_TO_LIST), NULL);
+    UiMenuAdd(m, P_QUIT, Tr(T_QUIT_DASHBOARD), NULL);
+    m->sel = sel < m->count ? sel : 0;
 }
 
 static int pause_menu(IDirect3DDevice9 *dev, Config *cfg, const char *gameFolder, Screen *screen, DiscSet *discs)
 {
     UiMenu m;
     UiInput in;
-    UiMenuClear(&m, Tr(T_PAUSED), Tr(T_FOOT_PAUSED));
-    UiMenuAdd(&m, P_RESUME, Tr(T_RESUME), NULL);
-    UiMenuAdd(&m, P_RESET, Tr(T_RESET_GAME), NULL);
-    UiMenuAdd(&m, P_SAVE_STATE, Tr(T_SAVE_STATE), NULL);
-    if (state_any(gameFolder)) UiMenuAdd(&m, P_LOAD_STATE, Tr(T_LOAD_STATE), NULL);
-    if (discs->count > 1)
-    {
-        char value[96];
-        _snprintf(value, sizeof(value), Tr(T_DISC_OF), discs->current + 1, discs->count);
-        value[sizeof(value) - 1] = 0;
-        UiMenuAdd(&m, P_DISC, Tr(T_CHANGE_DISC), value);
-    }
-    UiMenuAdd(&m, P_SETTINGS, Tr(T_SETTINGS), NULL);
-    UiMenuAdd(&m, P_ABOUT, Tr(T_ABOUT), NULL);
-    UiMenuAdd(&m, P_LIST, Tr(T_BACK_TO_LIST), NULL);
-    UiMenuAdd(&m, P_QUIT, Tr(T_QUIT_DASHBOARD), NULL);
+    pause_build(&m, gameFolder, discs, 0);
     UiInputInit(&in);
+    if (s_achOpen)
+    {
+        s_achOpen = 0;
+        ach_menu(dev, cfg, screen);
+        UiInputInit(&in);
+    }
     for (;;)
     {
         WORD down = UiInputPoll(&in);
         UiMenuNavigate(&m, down);
         if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_START | XINPUT_GAMEPAD_BACK)) return PAUSE_RESUME;
-        if (down & XINPUT_GAMEPAD_A)
+        if (down & XINPUT_GAMEPAD_X)
+        {
+            AboutScreen(dev, frozen_game, screen);
+            UiInputInit(&in);
+        }
+        else if ((down & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT | XINPUT_GAMEPAD_A)) && UiMenuSelected(&m) == P_SLOT)
+        {
+            s_lastSlot += (down & XINPUT_GAMEPAD_DPAD_LEFT) ? -1 : 1;
+            if (s_lastSlot < 1) s_lastSlot = STATE_SLOTS;
+            if (s_lastSlot > STATE_SLOTS) s_lastSlot = 1;
+            pause_build(&m, gameFolder, discs, m.sel);
+        }
+        else if (down & XINPUT_GAMEPAD_A)
         {
             switch (UiMenuSelected(&m))
             {
@@ -741,18 +1195,23 @@ static int pause_menu(IDirect3DDevice9 *dev, Config *cfg, const char *gameFolder
             case P_LOAD_STATE:
             {
                 char error[200];
-                int disc = discs->count > 1 ? discs->current : 0, save = UiMenuSelected(&m) == P_SAVE_STATE;
-                int slot = slot_menu(dev, gameFolder, save, screen);
-                if (!slot) break;
-                s_lastSlot = slot;
-                if (save)
+                int disc = discs->count > 1 ? discs->current : 0, slot = s_lastSlot;
+                if (UiMenuSelected(&m) == P_SAVE_STATE)
                 {
-                    if (state_save(gameFolder, slot, disc, error, sizeof(error)) == 0) return PAUSE_RESUME;
+                    if (state_save(gameFolder, slot, disc, error, sizeof(error)) == 0)
+                    {
+                        osd(Tr(T_OSD_SAVED), slot);
+                        return PAUSE_RESUME;
+                    }
                     message(dev, Tr(T_SAVE_STATE), error);
                 }
-                else
+                else if (state_exists(gameFolder, slot))
                 {
-                    if (state_load(gameFolder, slot, disc, error, sizeof(error)) == 0) return PAUSE_LOADED;
+                    if (state_load(gameFolder, slot, disc, error, sizeof(error)) == 0)
+                    {
+                        osd(Tr(T_OSD_LOADED), slot);
+                        return PAUSE_LOADED;
+                    }
                     message(dev, Tr(T_LOAD_STATE), error);
                 }
                 break;
@@ -760,19 +1219,26 @@ static int pause_menu(IDirect3DDevice9 *dev, Config *cfg, const char *gameFolder
             case P_DISC:
                 if (disc_menu(dev, discs, screen)) return PAUSE_RESUME;
                 break;
-            case P_SETTINGS: SettingsScreen(dev, cfg, gameFolder, frozen_game, screen); break;
-            case P_ABOUT: AboutScreen(dev, frozen_game, screen); break;
+            case P_CHEATS: cheats_menu(dev, cfg, gameFolder, screen); break;
+            case P_ACH: ach_menu(dev, cfg, screen); break;
+            case P_SETTINGS:
+                SettingsScreen(dev, cfg, gameFolder, frozen_game, screen);
+                xb_audio_set_target_ms(cfg->audioMs > 0 ? cfg->audioMs : 120);
+                break;
             case P_LIST: return PAUSE_LIST;
             case P_QUIT:
                 if (ConfirmScreen(dev, Tr(T_QUIT_ASK), Tr(T_QUIT), frozen_game, screen)) return PAUSE_QUIT;
                 break;
             }
+            pause_build(&m, gameFolder, discs, m.sel);
             UiInputInit(&in);
         }
+        UiServicePump(dev);
         dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
         UiBegin(dev);
         frozen_game(screen);
         UiMenuDraw(&m);
+        UiNotifyDraw();
         UiEnd();
         dev->Present(NULL, NULL, NULL, NULL);
     }
@@ -792,9 +1258,10 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
     u32 frames = 0, fpsFrames = 0, seconds = 0;
     int skipPresent = 0, skippedLast = 0;
     int audioThread = 0;
+    int slowCpuWhenBehind = 0;
     int gunPort = 0;
     int rotateConv = 0, rotatePending = 0, rotateStreak = 0;
-    double fps = 0;
+    double fps = 0, speed = 0;
     int result, useReal, outcome = XB_EMU_TO_LIST, quit = 0;
     DWORD backDown = 0;
     WORD prevButtons = 0;
@@ -802,6 +1269,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
     Config cfg = *baseCfg;
     Screen screen;
     DiscInfo info;
+    int gameSoundLag = 0;
 
     s_dev = dev;
     gameFolder[0] = 0;
@@ -841,23 +1309,38 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
         extern int g_xb_pvr_late_wait;
         g_xb_pvr_late_wait = cfg.renderWait == 1;
     }
+    {
+        extern int g_xb_fb_readback;
+        g_xb_fb_readback = cfg.fbReadback == 1;
+    }
     if (disc && disc[0] && disc_info_read_file(disc, &info) == 0)
     {
+        XbGameIdentity(disc, &info);
         disc_info_folder(&info, gameFolder, sizeof(gameFolder));
         SettingsPaths(gameFolder, NULL, gamePath, sizeof(gamePath));
         SettingsLoad(&cfg, gamePath);
         LOG_INFO("[emu] %s (%s %s)", info.title, info.product, info.version);
         gunPort = gun_port_of(info.product);
+        gameSoundLag = sound_lag_of(info.product);
         g_ta_trans_always_last = trans_always_last_of(info.product);
         g_sh4_jit_countdown_skip = cfg.countdown ? cfg.countdown == 1 : !no_countdown_skip_of(info.product);
         g_sh4_tmu_poll_skip = !no_tmu_poll_skip_of(info.product);
+        slowCpuWhenBehind = slow_cpu_when_behind_of(info.product);
         {
             extern int g_xb_exact_depth;
             g_xb_exact_depth = cfg.exactDepth ? cfg.exactDepth == 1 : exact_depth_of(info.product);
         }
         {
+            extern int g_xb_pal_shader;
+            g_xb_pal_shader = cfg.palShader ? cfg.palShader == 1 : pal_shader_of(info.product);
+        }
+        {
             extern int g_xb_pvr_late_wait;
             g_xb_pvr_late_wait = cfg.renderWait ? cfg.renderWait == 1 : late_render_wait_of(info.product);
+        }
+        {
+            extern int g_xb_fb_readback;
+            g_xb_fb_readback = cfg.fbReadback ? cfg.fbReadback == 1 : fb_readback_of(info.product);
         }
         {
             int hpos = vga_cable_of(info.product);
@@ -870,7 +1353,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
             }
         }
         rotateConv = arcade_conversion(info.product);
-        g_mmu_sq_only_ok = cfg.mmuSq ? cfg.mmuSq == 1 : arcade_conversion(info.product);
+        g_mmu_sq_only_ok = cfg.mmuSq ? cfg.mmuSq == 1 : mmu_sq_only_of(info.product);
         if (gunPort)
         {
             cfg.lightGun = 1;
@@ -900,13 +1383,38 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
             { extern int g_aica_measure, g_xb_audio_measure; g_aica_measure = g_xb_audio_measure = 1; }
         }
         if (cfg.fpuBench) xb_fpu_bench();
+        if (cfg.wavDump > 0)
+        {
+            extern s16 *g_aica_dump;
+            extern u32 g_aica_dump_cap, g_aica_dump_n, g_aica_dump_skip;
+            g_aica_dump_cap = (u32)cfg.wavDump * 44100u;
+            g_aica_dump = (s16 *)malloc(g_aica_dump_cap * 4);
+            g_aica_dump_n = 0;
+            g_aica_dump_skip = (u32)(cfg.wavDumpAt > 0 ? cfg.wavDumpAt : 0) * 44100u;
+            if (!g_aica_dump) g_aica_dump_cap = 0;
+        }
         s_initDone = 1;
     }
     g_sh4_jit_fast_fpu = cfg.fastFpu;
     g_sh4_jit_split = cfg.jitSplit;
     g_sh4_jit_skips = cfg.jitSkips;
     g_sh4_jit_fastmem = cfg.fastMem;
+    if (cfg.useJit && cfg.fastMem && debugger_takes_faults())
+    {
+        int choice = debugger_screen(dev);
+        LOG_WARN("[emu] a debugger is attached (xbdm): %s", choice == DEBUGGER_NO_FASTMEM ? "fast memory access off for this game"
+                                                            : choice == DEBUGGER_KEEP ? "fast memory access kept (the game may freeze)"
+                                                                                      : "back to the list");
+        if (choice == DEBUGGER_BACK) return XB_EMU_TO_LIST;
+        if (choice == DEBUGGER_NO_FASTMEM) g_sh4_jit_fastmem = 0;
+    }
     g_sh4_jit_idle_skip = cfg.idleSkip;
+    if (cfg.jitTrail && !cfg.sampler)
+    {
+        extern void (*g_sh4_illegal_hook)(u32 pc);
+        g_sh4_jit_dispatch_hook = trail_record;
+        g_sh4_illegal_hook = trail_dump;
+    }
     g_xb_auto_rotate = 0;
     {
         extern int g_xb_orient;
@@ -921,9 +1429,14 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
         { extern int g_xb_huge_depth; g_xb_huge_depth = cfg.hugeDepth; }
         g_xb_fog = cfg.fog;
         { extern int g_xb_widescreen; g_xb_widescreen = cfg.widescreen; }
-        { extern int g_xb_tex_filter; g_xb_tex_filter = cfg.texFilter; }
+        { extern int g_xb_tex_filter; g_xb_tex_filter = cfg.texFilter; } { extern int g_xb_render_1x; g_xb_render_1x = cfg.renderScale == 1; }
         { extern int g_aica_trace; g_aica_trace = cfg.aicaTrace; }
-        if (cfg.soundLag > 0) { extern u64 g_sound_lag_max; g_sound_lag_max = (u64)cfg.soundLag * 4535u; }
+        {
+            extern u64 g_sound_lag_max;
+            int lag = cfg.soundLag > 0 ? cfg.soundLag : gameSoundLag;
+            g_sound_lag_max = lag > 0 ? (u64)lag * 4535u : (u64)SH4_CLOCK_HZ / 60u;
+            if (lag > 0) LOG_INFO("[sound] the sound side at most %d samples behind the SH-4", lag);
+        }
     }
     sh4_jit_enable(cfg.useJit);
     xb_audio_set_target_ms(cfg.audioMs > 0 ? cfg.audioMs : 120);
@@ -938,6 +1451,17 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
         LOG_ERROR("[emu] %s", error);
         message(dev, Tr(T_BIOS_MISSING), error);
         return XB_EMU_ERROR;
+    }
+    if (useReal && disc && disc[0])
+    {
+        int region = cfg.region;
+        if (region < 0)
+        {
+            DiscInfo di;
+            region = disc_info_read_file(disc, &di) == 0 ? disc_info_console_region(&di) : -1;
+        }
+        flash_set_region(region);
+        LOG_INFO("[emu] Sega BIOS, console region %d", region);
     }
     if (!useReal)
     {
@@ -970,7 +1494,9 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
     }
     dc_reset();
     xb_pvr_reset();
-    vmu_load();
+    vmu_load(gameFolder, cfg.vmuShared);
+    cheats_load(&cfg, gameFolder[0] ? info.product : "", gameFolder);
+    XbRaGameStart(disc);
     if (cfg.loadState)
     {
         if (state_load(gameFolder, cfg.loadState, discs.count > 1 ? discs.current : 0, error, sizeof(error)) != 0)
@@ -1098,6 +1624,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
             }
         }
         rumble_update(&cfg);
+        if (s_achOpen) openMenu = 1;
         if (openMenu)
         {
             int r;
@@ -1108,7 +1635,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
             r = pause_menu(dev, &cfg, gameFolder, &screen, &discs);
             vsync = cfg.vsync != 0;
             if (!vsync) dev->SetRenderState(D3DRS_PRESENTINTERVAL, D3DPRESENT_INTERVAL_IMMEDIATE);
-            { extern int g_xb_tex_filter; g_xb_tex_filter = cfg.texFilter; }
+            { extern int g_xb_tex_filter; g_xb_tex_filter = cfg.texFilter; } { extern int g_xb_render_1x; g_xb_render_1x = cfg.renderScale == 1; }
             maple_set_rumble_pack(cfg.rumble);
             { extern int g_xb_widescreen; g_xb_widescreen = cfg.widescreen; }
             if (r == PAUSE_RESET)
@@ -1116,6 +1643,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
                 dc_reset();
                 xb_pvr_reset();
                 screen.tex = NULL;
+                XbRaReset(cheat_active(s_cheats));
                 LOG_INFO("[emu] reset");
             }
             else if (r == PAUSE_LOADED)
@@ -1157,6 +1685,10 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
         }
         frames++;
         fpsFrames++;
+        cheat_apply(s_cheats);
+        XbRaFrame(cheat_active(s_cheats));
+        if (cfg.raToast > 0 && frames == (u32)cfg.raToast) XbRaTestToast();
+        if (cfg.achAt > 0 && frames == (u32)cfg.achAt) s_achOpen = 1;
         if (cfg.gpuDump > 0 && frames == (u32)cfg.gpuDump) xb_pvr_dump_frames(cfg.gpuDumpCount > 0 ? cfg.gpuDumpCount : 1);
         if (cfg.jitMap > 0 && frames % (u32)cfg.jitMap == 0)
         {
@@ -1252,6 +1784,10 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
             double mips = (double)(sched_now() - cyclesAtT0) / secs / 1e6;
             f64 ms[PROF_COUNT];
             fps = fpsFrames / secs;
+            {
+                u64 cyclesNow = sched_now();
+                speed = cyclesNow > cyclesAtT0 ? (double)(cyclesNow - cyclesAtT0) / secs / (double)SH4_CLOCK_HZ * 100.0 : 0.0;
+            }
             if (cfg.vsync == 1 && vsync && fps < 57.0)
             {
                 dev->SetRenderState(D3DRS_PRESENTINTERVAL, D3DPRESENT_INTERVAL_IMMEDIATE);
@@ -1300,12 +1836,12 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
                 static u32 lastYuv;
                 u32 yuv = pvr_yuv_blocks();
                 int pct = dc_cpu_percent(), was = pct;
-                if (yuv - lastYuv >= 60)
+                if (yuv - lastYuv >= 60 || slowCpuWhenBehind)
                 {
                     if (fps < 58.0)
                     {
                         pct = (int)(pct * fps / 60.0);
-                        if (pct < 50) pct = 50;
+                        if (pct < (slowCpuWhenBehind ? 40 : 50)) pct = slowCpuWhenBehind ? 40 : 50;
                     }
                     else if (ms[PROF_SH4] < 10.0 && pct < 100)
                         pct = pct + 5 > 100 ? 100 : pct + 5;
@@ -1315,7 +1851,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
                 if (pct != was)
                 {
                     dc_set_cpu_percent(pct);
-                    LOG_INFO("[emu] SH-4 at %d%% of its speed (%s)", pct, pct < 100 ? "movie" : "movie over");
+                    LOG_INFO("[emu] SH-4 at %d%% of its speed (%s)", pct, pct < 100 ? (slowCpuWhenBehind ? "behind" : "movie") : (slowCpuWhenBehind ? "caught up" : "movie over"));
                 }
             }
             cpuLoad = (ms[PROF_SH4] + ms[PROF_ARM7] + ms[PROF_AICA]) / (1000.0 / 59.94);
@@ -1332,6 +1868,14 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
                 xb_pvr_tex_stats(&decodes, &decodeMs, &uploadMs);
                 LOG_INFO("[xenos] per field: %.1f textures decoded, %.2f ms decoding, %.2f ms creating/filling",
                          decodes / (double)fpsFrames, decodeMs / fpsFrames, uploadMs / fpsFrames);
+                {
+                    u32 bands;
+                    f64 fbMs, fbWaitMs;
+                    xb_pvr_fb_stats(&bands, &fbMs, &fbWaitMs);
+                    if (bands)
+                        LOG_INFO("[xenos] frames read back per field: %.1f bands of lines, %.2f ms (%.2f ms waiting for the frame)",
+                                 bands / (double)fpsFrames, fbMs / fpsFrames, fbWaitMs / fpsFrames);
+                }
                 {
                     f64 dms, oms, tms;
                     u32 rf;
@@ -1487,33 +2031,36 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
 
         if (!skipPresent)
         {
+        XbRaBadgesPump(dev);
         dev->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
         UiBegin(dev);
         if (tex) draw_picture(dev, tex, &cfg);
         if (tex && cfg.lightGun) draw_gun_sight();
         if (cfg.showFps)
         {
-            char badge[96];
+            char badge[192];
             int n = _snprintf(badge, sizeof(badge), "%.1f FPS", fps);
             if (cfg.showFps >= 2 && n > 0)
             {
-                MEMORYSTATUS mem;
-                GlobalMemoryStatus(&mem);
-                n += _snprintf(badge + n, sizeof(badge) - n, "  " UI_CH_MIDDOT "  CPU %d%%  " UI_CH_MIDDOT "  RAM %u MB", (int)(cpuLoad * 100 + 0.5),
-                               (unsigned)((mem.dwTotalPhys - mem.dwAvailPhys) >> 20));
+                char sp[48], res[48];
+                _snprintf(sp, sizeof(sp) - 1, Tr(T_SPEED_PCT), speed > 0 ? (int)(speed + 0.5) : 0);
+                sp[sizeof(sp) - 1] = 0;
+                shown_resolution(res, sizeof(res), screen.tex, &cfg);
+                n += _snprintf(badge + n, sizeof(badge) - n, "\n%s\n%s", sp, res);
             }
             if (cfg.showFps >= 3 && n > 0 && n < (int)sizeof(badge))
             {
-                u32 ctrl = pvr_reg(0x005F8044), size = pvr_reg(0x005F805C), depth = (ctrl >> 2) & 3;
-                u32 bpp = depth == 2 ? 3 : depth == 3 ? 4 : 2, lines = ((size >> 10) & 0x3FF) + 1;
-                if ((pvr_reg(0x005F80D0) >> 4) & 1) lines *= 2;
-                _snprintf(badge + n, sizeof(badge) - n, "  " UI_CH_MIDDOT "  %ux%u%s", ((size & 0x3FF) + 1) * 4 / bpp, lines,
-                          cfg.widescreen && cfg.gpuDisplay && cfg.gpuRender ? " 16:9" : "");
+                MEMORYSTATUS mem;
+                GlobalMemoryStatus(&mem);
+                _snprintf(badge + n, sizeof(badge) - n, "\nCPU %d%%\nRAM %u MB", (int)(cpuLoad * 100 + 0.5),
+                          (unsigned)((mem.dwTotalPhys - mem.dwAvailPhys) >> 20));
             }
             badge[sizeof(badge) - 1] = 0;
-            UiFpsBadge(badge);
+            if (cfg.showFps >= 2) UiPerfPanel(badge);
+            else UiFpsBadge(badge);
         }
-        if (s_osdAt && GetTickCount() - s_osdAt < OSD_MS)
+        if (UiNotifyDraw()) {}
+        else if (s_osdAt && GetTickCount() - s_osdAt < OSD_MS)
             UiToast(s_osd, (float)(GetTickCount() - s_osdAt), (float)OSD_MS);
         else if (frames < 300)
         {
@@ -1550,8 +2097,35 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
     xb_pvr_sync();
     if (!vsync) dev->SetRenderState(D3DRS_PRESENTINTERVAL, D3DPRESENT_INTERVAL_ONE);
     LOG_INFO("[emu] stop after %u fields, pc %08X", frames, g_sh4.pc);
+    {
+        extern s16 *g_aica_dump;
+        extern u32 g_aica_dump_n;
+        if (g_aica_dump && g_aica_dump_n)
+        {
+            char path[96];
+            FILE *f;
+            u32 hd[11], i, bytes = g_aica_dump_n * 4;
+            hd[0] = 0x46464952u; hd[1] = 36 + bytes; hd[2] = 0x45564157u; hd[3] = 0x20746D66u; hd[4] = 16;
+            hd[5] = 1u | (2u << 16); hd[6] = 44100; hd[7] = 44100 * 4; hd[8] = 4u | (16u << 16); hd[9] = 0x61746164u; hd[10] = bytes;
+            for (i = 0; i < 11; i++) hd[i] = _byteswap_ulong(hd[i]);
+            for (i = 0; i < g_aica_dump_n * 2; i++) g_aica_dump[i] = (s16)_byteswap_ushort((u16)g_aica_dump[i]);
+            xb_fs_data_path(path, sizeof(path), "saves", "aica.wav");
+            f = fopen(path, "wb");
+            if (f)
+            {
+                fwrite(hd, 4, 11, f);
+                fwrite(g_aica_dump, 4, g_aica_dump_n, f);
+                fclose(f);
+                LOG_INFO("[emu] %u samples of the AICA's output written to %s", g_aica_dump_n, path);
+            }
+            g_aica_dump_n = 0;
+        }
+    }
     xb_log_flush();
     dc_insert_disc(NULL);
     disc_set_read_ahead(-2);
+    XbRaGameEnd();
+    cheat_free(s_cheats);
+    s_cheats = NULL;
     return outcome;
 }

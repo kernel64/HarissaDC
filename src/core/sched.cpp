@@ -154,6 +154,8 @@ void sched_run_due(void)
     }
 }
 
+static int s_loaded;
+
 void sched_state(StateIO *io)
 {
     int i, n = s_count;
@@ -168,5 +170,19 @@ void sched_state(StateIO *io)
     for (i = 0; i < n; i++) STATE(io, s_events[i].when);
     if (io->loading)
         for (i = n; i < s_count; i++) s_events[i].when = SCHED_NEVER;
-    if (io->loading) update_next();
+    if (io->loading)
+    {
+        s_loaded = n;
+        update_next();
+    }
+}
+
+void sched_state_insert_idle(int at, int count)
+{
+    int i;
+    if (at < 0 || count <= 0 || s_loaded + count > s_count) return;
+    for (i = s_loaded - 1; i >= at; i--) s_events[i + count].when = s_events[i].when;
+    for (i = at; i < at + count; i++) s_events[i].when = SCHED_NEVER;
+    s_loaded += count;
+    update_next();
 }

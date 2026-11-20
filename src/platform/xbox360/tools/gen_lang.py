@@ -207,24 +207,37 @@ def main():
         onoff = [t["ON"], t["OFF"]]
         src_names = [t["SRC_NONE"], "START", t["SRC_LS"], t["SRC_RS"]]
         menus = {
-            "settings": [("CPU_NEXT", [t["RECOMPILER"], t["INTERPRETER"]], 1),
-                         ("RENDERER_NEXT", [t["GPU"], t["SOFTWARE"]], 1),
-                         ("SHOW_FPS", [t["OFF"], t["FPS_ONLY"], t["FPS_CPU"], t["FPS_ALL"]], 1),
-                         ("GRAPHICS", [t["PRESET_ORIGINAL"], t["PRESET_ENHANCED"], t["PRESET_SMOOTH"], t["PRESET_CRT"], t["CUSTOM"]], 0),
-                         ("CONTROLS", [t["CUSTOM"], t["DEFAULT"]], 0), ("LANGUAGE", names, 0),
+            "settings": [("PICTURE", [t["ASPECT_43"], t["ASPECT_WIDE"], t["ASPECT_STRETCH"]], 0),
+                         ("EFFECTS", [t["PRESET_ORIGINAL"], t["PRESET_ENHANCED"], t["PRESET_SMOOTH"], t["PRESET_CRT"], t["CUSTOM"]], 0),
+                         ("CONTROLS", [t["CUSTOM"], t["DEFAULT"]], 0), ("INTERFACE", names, 0),
+                         ("ADVANCED", [t["GPU"], t["SOFTWARE"]], 0),
+                         ("ACHIEVEMENTS", [t["ON"], t["OFF"]], 0),
                          ("SAVE_ALL", [], 1), ("SAVE_GAME", [], 1), ("BACK", [], 1)],
-            "graphics": [("PRESET", [t["PRESET_ORIGINAL"], t["PRESET_ENHANCED"], t["PRESET_SMOOTH"], t["PRESET_CRT"], t["CUSTOM"]], 1),
-                         ("ASPECT", [t["ASPECT_43"], t["ASPECT_WIDE"], t["ASPECT_STRETCH"]], 1), ("VSYNC", onoff + [t["VSYNC_STRICT"]], 1),
-                         ("TEXFILTER", [t["FILTER_GAME"], t["FILTER_NEAREST"], t["FILTER_BILINEAR"]], 1), ("PIC_SIZE", ["100%"], 1),
-                         ("PIC_LR", ["-96"], 1), ("PIC_UD", ["-64"], 1),
-                         ("BRIGHTNESS", [t["NORMAL"], t["LIGHTER"], t["MUCH_LIGHTER"]], 1), ("SMOOTH_SCALING", onoff, 1),
-                         ("FXAA", onoff, 1), ("SHARPEN", [t["OFF"], t["LOW"], t["HIGH"]], 1),
-                         ("BLUR", [t["OFF"], t["SOFT"], t["STRONG"]], 1),
-                         ("SCREEN_EFFECT", [t["SCREEN_NONE"], t["SCANLINES"], t["CRT"], t["CRT_CURVED"], t["LCD_GRID"], t["LIGHT_SCANLINES"]], 1),
-                         ("BACK", [], 1)],
-            "controls": [("ANALOG_STICK", [t["STICK_LEFT"], t["STICK_RIGHT"]], 1), ("DEFAULT_CONTROLS", [], 1), ("BACK", [], 1)],
-            "pause": [("RESUME", [], 1), ("RESET_GAME", [], 1), ("SAVE_STATE", [], 1), ("LOAD_STATE", [], 1),
-                      ("CHANGE_DISC", [t["DISC_OF"].replace("%d", "8")], 0), ("SETTINGS", [], 1), ("ABOUT", [], 1),
+            "picture": [("ASPECT", [t["ASPECT_43"], t["ASPECT_WIDE"], t["ASPECT_STRETCH"]], 1),
+                        ("ORIENTATION", [t["ORIENT_AUTO"], t["ORIENT_NORMAL"], t["ORIENT_90"], t["ORIENT_270"]], 1),
+                        ("BRIGHTNESS", [t["NORMAL"], t["LIGHTER"], t["MUCH_LIGHTER"]], 1), ("PIC_SIZE", ["100%"], 1),
+                        ("PIC_LR", ["-96"], 1), ("PIC_UD", ["-64"], 1), ("BACK", [], 1)],
+            "effects": [("PRESET", [t["PRESET_ORIGINAL"], t["PRESET_ENHANCED"], t["PRESET_SMOOTH"], t["PRESET_CRT"], t["CUSTOM"]], 1),
+                        ("TEXFILTER", [t["FILTER_GAME"], t["FILTER_NEAREST"], t["FILTER_BILINEAR"]], 1),
+                        ("SMOOTH_SCALING", onoff, 1), ("FXAA", onoff, 1), ("SHARPEN", [t["OFF"], t["LOW"], t["HIGH"]], 1),
+                        ("BLUR", [t["OFF"], t["SOFT"], t["STRONG"]], 1),
+                        ("SCREEN_EFFECT", [t["SCREEN_NONE"], t["SCANLINES"], t["CRT"], t["CRT_CURVED"], t["LCD_GRID"], t["LIGHT_SCANLINES"]], 1),
+                        ("BACK", [], 1)],
+            "interface": [("LANGUAGE", names, 0), ("SHOW_FPS", [t["OFF"], t["FPS_ONLY"], t["FPS_CPU"], t["FPS_ALL"]], 1),
+                          ("ART_DOWNLOADS", onoff, 1), ("ART_ALL", [], 1), ("BACK", [], 1)],
+            "achievements": [("RA_ENABLE", onoff, 1), ("RA_ACCOUNT", [t["RA_NOT_CONNECTED"], t["RA_CONNECTING"], "WWWWWWWWWWWW"], 0),
+                             ("BACK", [], 1)],
+            "advanced": [("CPU_NEXT", [t["RECOMPILER"], t["INTERPRETER"]], 1), ("RENDERER_NEXT", [t["GPU"], t["SOFTWARE"]], 1),
+                         ("BIOS_NEXT", [t["BIOS_HLE"], t["BIOS_REAL"], t["BIOS_AUTO"]], 1),
+                         ("VSYNC", onoff + [t["VSYNC_STRICT"]], 1), ("AUDIO_MARGIN", ["500 ms"], 1), ("BACK", [], 1)],
+            "controls": [("ANALOG_STICK", [t["STICK_LEFT"], t["STICK_RIGHT"], t["SRC_NONE"]], 1),
+                         ("STICK_DPAD", [t["OFF"], t["STICK_LEFT"], t["STICK_RIGHT"], t["CUSTOM"]], 1),
+                         ("DEFAULT_CONTROLS", [], 1), ("BACK", [], 1)],
+            "pause": [("RESUME", [], 1), ("SAVE_STATE", [], 1), ("LOAD_STATE", [t["EMPTY"]], 0),
+                      ("STATE_SLOT", ["4 \u00b7 " + t["SAVED"], "4 \u00b7 " + t["EMPTY"]], 1),
+                      ("CHANGE_DISC", [t["DISC_OF"].replace("%d", "8")], 0),
+                      ("CHEATS", [t["CHEATS_ON"].replace("%d", "99")], 0),
+                      ("ACHIEVEMENTS", ["999 / 999"], 0), ("SETTINGS", [], 1), ("RESET_GAME", [], 1),
                       ("BACK_TO_LIST", [], 1), ("QUIT_DASHBOARD", [], 1)],
         }
         for menu, rows in menus.items():
@@ -235,11 +248,18 @@ def main():
         for key in ("DC_START", "DC_LTRIG", "DC_RTRIG"):
             lw = width(t["DC_BUTTON"].replace("%s", t[key]), 22, True)
             check(code, "controls row %s" % key, lw + max(value_width(v) for v in src_names) + 24, 660 - 84)
-        for key in ("SETTINGS", "GRAPHICS", "CONTROLS", "PAUSED", "SAVE_STATE", "LOAD_STATE", "CHANGE_DISC"):
+        for key in ("SETTINGS", "SETTINGS_ALL", "PICTURE", "EFFECTS", "INTERFACE", "ADVANCED", "CONTROLS", "PAUSED", "CHANGE_DISC"):
             check(code, "title " + key, width(t[key], 30, True), 660 - 80)
-        for key in ("FOOT_SELECT", "FOOT_PAUSED", "FOOT_SAVE", "FOOT_LOAD", "FOOT_INSERT"):
+        check(code, "title CHEATS", width(t["CHEATS"] + "  999 / 999", 30, True), 660 - 80)
+        check(code, "cheat row value CHEAT_UNSUPPORTED", width(t["CHEAT_UNSUPPORTED"], 21, False), 200)
+        check(code, "title ACHIEVEMENTS", width(t["ACHIEVEMENTS"] + "  999 / 999", 30, True), 660 - 80)
+        for key in ("FOOT_SELECT", "FOOT_PAUSED", "FOOT_INSERT", "FOOT_CHEATS", "FOOT_ACH"):
             check(code, key, footer_width(t[key]), 660 - 80)
         check(code, "FOOT_BROWSER", footer_width(t["FOOT_BROWSER"]), 1280 - 128)
+        check(code, "FOOT_DEBUGGER", footer_width(t["FOOT_DEBUGGER"]), 1280 - 128)
+        for key in ("RA_CONNECTED", "RA_LOGIN_FAILED", "RA_LOGGED_OUT", "RA_GAME", "RA_NONE", "RA_MASTERED", "RA_CHEATS_OFF", "RA_OFF_HINT"):
+            check(code, "toast " + key, width(t[key].replace("%s", "WWWWWWWWWWWW").replace("%d", "999"), 21, False) + 72, 1280 - 128)
+        check(code, "toast RA_UNLOCKED", width(t["RA_UNLOCKED"].replace("%s", "").replace("%d", "100"), 21, False) + 72 + 56 + 28, 1280 - 128 - 300)
         for key in ("HINT", "OSD_NO_STATES", "OSD_SAVED", "OSD_LOADED", "OSD_SLOT_SAVED", "OSD_SLOT_EMPTY", "SAVED_ALL", "SAVED_GAME",
                     "SETTINGS_WRITE_FAILED"):
             check(code, "toast " + key, width(t[key], 21, False) + 72, 1280 - 128)
@@ -248,7 +268,7 @@ def main():
         check(code, "LANG_NAME", width(t["LANG_NAME"], 22, True), 200)
         check(code, "NO_HEADER", width(t["NO_HEADER"], 18, False), 520)
         check(code, "ARCHIVE_NOTE", width(t["ARCHIVE_NOTE"], 18, False), 520)
-        for key in ("CRASHED", "BOOT_FAILED", "DISC_ERROR", "CANNOT_UNPACK", "OUT_OF_MEMORY", "BIOS_MISSING", "NO_DISC"):
+        for key in ("CRASHED", "BOOT_FAILED", "DISC_ERROR", "CANNOT_UNPACK", "OUT_OF_MEMORY", "BIOS_MISSING", "NO_DISC", "DEBUGGER"):
             check(code, "message title " + key, width(t[key], 30, True), 1100)
     if not ok:
         sys.exit(1)

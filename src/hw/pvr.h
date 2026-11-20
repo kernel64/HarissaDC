@@ -43,6 +43,15 @@ typedef void (*PvrRenderFn)(void);
 extern PvrRenderFn g_pvr_render;
 extern void (*g_pvr_render_wait)(void);
 
+void pvr_fb_store(u32 line, u32 x, u32 argb, u32 ctrl);
+
+extern u32 g_pvr_fb_lo, g_pvr_fb_hi;
+extern void (*g_pvr_fb_readback)(u32 off32);
+static __inline void pvr_fb_check(u32 off32)
+{
+    if (off32 - g_pvr_fb_lo < g_pvr_fb_hi - g_pvr_fb_lo) g_pvr_fb_readback(off32);
+}
+
 #define PVR_REG_WORDS 2048
 void pvr_regs_copy(u32 *out);
 void pvr_debug_set(const u32 *regs, const u32 *ta, u32 words);

@@ -159,7 +159,7 @@ static u32 *s_taData;
 static u32 s_taWords;
 static u32 *s_taBuf[2], s_taCur;
 static u32 s_taIsp;
-static u32 s_doneWords, s_doneIsp, s_doneValid;
+static u32 s_doneWords[2], s_doneIsp[2], s_doneValid[2];
 static const u32 *s_renderData;
 static u32 s_renderWords;
 static u32 s_fifo[16];
@@ -183,9 +183,9 @@ static void ta_reset(void)
 static void ta_keep_list(void)
 {
     if (!s_taWords || !s_taBuf[1]) return;
-    s_doneWords = s_taWords;
-    s_doneIsp = s_taIsp;
-    s_doneValid = 1;
+    s_doneWords[s_taCur] = s_taWords;
+    s_doneIsp[s_taCur] = s_taIsp;
+    s_doneValid[s_taCur] = 1;
     s_taCur ^= 1;
     s_taData = s_taBuf[s_taCur];
 }
@@ -228,6 +228,7 @@ static u32 vertex_words(u32 pcw, int sprite)
 static void ta_param(const u32 *p)
 {
     u32 pcw = p[0], type = PCW_PARA_TYPE(pcw);
+    if (!s_taWords) s_doneValid[s_taCur] = 0;
     if (s_taWords + s_paramWords <= TA_MAX_WORDS)
     {
         u32 *d = s_taData + s_taWords, k;
@@ -419,6 +420,29 @@ static void ta_alloc(void)
 PvrRenderFn g_pvr_render;
 void (*g_pvr_render_wait)(void);
 u32 g_pvr_palette_gen;
+u32 g_pvr_fb_lo, g_pvr_fb_hi;
+void (*g_pvr_fb_readback)(u32 off32);
+
+void pvr_fb_store(u32 line, u32 x, u32 argb, u32 ctrl)
+{
+    u32 kval = (ctrl >> 8) & 0xFF, threshold = (ctrl >> 16) & 0xFF;
+    u32 a = argb >> 24, r = (argb >> 16) & 255, g = (argb >> 8) & 255, b = argb & 255, v;
+    switch (ctrl & 7)
+    {
+    case 0: v = ((kval & 0x80) << 8) | (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3); break;
+    case 1: v = (r >> 3) << 11 | (g >> 2) << 5 | (b >> 3); break;
+    case 2: v = (a >> 4) << 12 | (r >> 4) << 8 | (g >> 4) << 4 | (b >> 4); break;
+    case 3: v = (a >= threshold ? 0x8000u : 0) | (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3); break;
+    case 4:
+        buf_w8(g_vram, vram_offset64((line + x * 3) & 0x007FFFFFu), (u8)b);
+        buf_w8(g_vram, vram_offset64((line + x * 3 + 1) & 0x007FFFFFu), (u8)g);
+        buf_w8(g_vram, vram_offset64((line + x * 3 + 2) & 0x007FFFFFu), (u8)r);
+        return;
+    case 5: buf_w32(g_vram, vram_offset64((line + x * 4) & 0x007FFFFCu), (kval << 24) | (argb & 0xFFFFFF)); return;
+    default: buf_w32(g_vram, vram_offset64((line + x * 4) & 0x007FFFFCu), argb); return;
+    }
+    buf_w16(g_vram, vram_offset64((line + x * 2) & 0x007FFFFEu), (u16)v);
+}
 
 void pvr_regs_copy(u32 *out)
 {
@@ -434,6 +458,7 @@ void pvr_debug_set(const u32 *regs, const u32 *ta, u32 words)
     if (words > TA_MAX_WORDS) words = TA_MAX_WORDS;
     memcpy(s_taData, ta, words * 4);
     s_taWords = words;
+    s_doneValid[0] = s_doneValid[1] = 0;
 }
 
 int g_pvr_gun_hpos = 286;
@@ -460,10 +485,15 @@ static void start_render(void)
     u32 param = REG(0x005F8020) & 0x7FFFFFu, bytes;
     s_renderData = s_taData;
     s_renderWords = s_taWords;
-    if (param != s_taIsp && s_doneValid && param == s_doneIsp)
+    if (param != s_taIsp || !s_taWords)
     {
-        s_renderData = s_taBuf[s_taCur ^ 1];
-        s_renderWords = s_doneWords;
+        u32 b = s_taCur ^ 1;
+        if (!(s_doneValid[b] && s_doneIsp[b] == param)) b ^= 1;
+        if (s_doneValid[b] && s_doneIsp[b] == param && (b != s_taCur || !s_taWords))
+        {
+            s_renderData = s_taBuf[b];
+            s_renderWords = s_doneWords[b];
+        }
     }
     bytes = s_renderWords * 4;
     if (g_pvr_render) g_pvr_render();
@@ -524,7 +554,8 @@ void pvr_write(u32 addr, u32 value, int size)
         {
             ta_keep_list();
             s_taIsp = REG(TA_ISP_BASE) & 0x7FFFFFu;
-            if (s_doneIsp == s_taIsp) s_doneValid = 0;
+            if (s_doneIsp[0] == s_taIsp) s_doneValid[0] = 0;
+            if (s_doneIsp[1] == s_taIsp) s_doneValid[1] = 0;
             ta_reset();
             REG(TA_ITP_CURRENT) = REG(TA_ISP_BASE);
             REG(TA_NEXT_OPB) = REG(TA_NEXT_OPB_INIT);
@@ -708,7 +739,7 @@ void pvr_reset(void)
     s_frames = 0;
     spg_recalc();
     ta_reset();
-    s_doneValid = 0;
+    s_doneValid[0] = s_doneValid[1] = 0;
     s_taIsp = 0;
     yuv_init();
     memset(&s_lastStats, 0, sizeof(s_lastStats));
@@ -733,7 +764,7 @@ void pvr_state(StateIO *io)
     state_io(io, s_taData, s_taWords * 4);
     if (io->loading)
     {
-        s_doneValid = 0;
+        s_doneValid[0] = s_doneValid[1] = 0;
         s_taIsp = REG(TA_ISP_BASE) & 0x7FFFFFu;
     }
     STATE(io, s_fifo); STATE(io, s_fifoWords); STATE(io, s_paramWords); STATE(io, s_list); STATE(io, s_vertexWords);

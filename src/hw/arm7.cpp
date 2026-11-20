@@ -605,7 +605,7 @@ void arm7_interp_op(u32 op)
 {
     s_extra = 0;
     execute(op);
-    A.cycles -= 1 + s_extra;
+    A.cycles -= ARM7_INSN_CYCLES + s_extra;
 }
 
 static void take_fiq(void)
@@ -661,7 +661,7 @@ void arm7_run(s32 cycles)
         }
         s_extra = 0;
         arm7_step();
-        A.cycles -= 1 + s_extra;
+        A.cycles -= ARM7_INSN_CYCLES + s_extra;
         if (s_asleep)
         {
             A.cycles = 0;

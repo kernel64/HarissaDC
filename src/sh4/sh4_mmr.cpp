@@ -165,7 +165,8 @@ static void tmu_write_tcr(int ch, u16 v)
     tmu_schedule(ch);
 }
 
-static u8 s_ocram[0x2000];
+static u8 s_ocramOwn[0x2000];
+static u8 *s_ocram = s_ocramOwn;
 #define CCR_ORA 0x20u
 #define CCR_OIX 0x80u
 
@@ -176,7 +177,31 @@ static u32 ocram_offset(u32 addr)
 }
 
 u8 *sh4_ocram_bytes(void) { return s_ocram; }
+u8 **sh4_ocram_ptr(void) { return &s_ocram; }
 int sh4_ocram_simple(void) { return (g_ccn.ccr & (CCR_ORA | CCR_OIX)) == CCR_ORA; }
+
+static void ocram_place(void)
+{
+    int inWindow = s_ocram != s_ocramOwn;
+    if (inWindow && (!g_mem_window || s_ocram != g_mem_window + MEM_WINDOW_OCRAM))
+    {
+        s_ocram = s_ocramOwn;
+        inWindow = 0;
+    }
+    if (sh4_ocram_simple() && !inWindow)
+    {
+        u8 *p = mem_window_ocram(1);
+        if (!p) return;
+        memcpy(p, s_ocramOwn, sizeof(s_ocramOwn));
+        s_ocram = p;
+    }
+    else if (!sh4_ocram_simple() && inWindow)
+    {
+        memcpy(s_ocramOwn, s_ocram, sizeof(s_ocramOwn));
+        mem_window_ocram(0);
+        s_ocram = s_ocramOwn;
+    }
+}
 
 u32 sh4_ocram_read(u32 addr, int size)
 {
@@ -238,7 +263,7 @@ static void log_unknown(const char *what, u32 addr, u32 value)
     if (s_logged < 64)
     {
         s_logged++;
-        LOG_WARN("[sh4] %s unhandled register %08X (%08X)", what, addr, value);
+        LOG_WARN("[sh4] %s unhandled register %08X (%08X), pc %08X pr %08X", what, addr, value, g_sh4.pc, g_sh4.pr);
     }
 }
 
@@ -358,7 +383,10 @@ void sh4_p4_write(u32 addr, u32 value, int size)
     case 0xFF000010: sh4_mmu_write_mmucr(value); return;
     case 0xFF000014: g_ccn.basra = (u8)value; return;
     case 0xFF000018: g_ccn.basrb = (u8)value; return;
-    case 0xFF00001C: g_ccn.ccr = value & ~0x0808u; return;
+    case 0xFF00001C:
+        g_ccn.ccr = value & ~0x0808u;
+        ocram_place();
+        return;
     case 0xFF000020: g_ccn.tra = value; return;
     case 0xFF000024: g_ccn.expevt = value; return;
     case 0xFF000028: g_ccn.intevt = value; return;
@@ -457,7 +485,8 @@ void sh4_mmr_reset(void)
     memset(&g_intc, 0, sizeof(g_intc));
     memset(&g_dmac, 0, sizeof(g_dmac));
     memset(g_sq, 0, sizeof(g_sq));
-    memset(s_ocram, 0, sizeof(s_ocram));
+    ocram_place();
+    memset(s_ocramOwn, 0, sizeof(s_ocramOwn));
     for (ch = 0; ch < 3; ch++)
     {
         int ev = s_tmu[ch].event;
@@ -492,5 +521,11 @@ void sh4_mmr_state(StateIO *io)
     STATE(io, s_scsmr2); STATE(io, s_scscr2); STATE(io, s_scfcr2); STATE(io, s_scsptr2); STATE(io, s_sclsr2);
     STATE(io, s_scbrr2);
     STATE(io, s_tmu); STATE(io, s_tocr); STATE(io, s_tstr); STATE(io, s_tcpr2);
-    STATE(io, s_ocram);
+    state_io(io, s_ocram, (u32)sizeof(s_ocramOwn));
+    ocram_place();
+    if (io->loading)
+    {
+        int ch;
+        for (ch = 0; ch < 3; ch++) tmu_update_irq(ch);
+    }
 }

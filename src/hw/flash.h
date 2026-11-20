@@ -7,6 +7,8 @@
 #include "../core/types.h"
 
 void flash_reset(void);
+void flash_set_region(int region);
+void flash_set_date(u32 rtcSeconds);
 u32 flash_read(u32 addr, int size);
 void flash_write(u32 addr, u32 value, int size);
 int flash_dirty(void);

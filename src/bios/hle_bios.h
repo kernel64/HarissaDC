@@ -9,8 +9,14 @@
 enum HleRegion { HLE_REGION_JAPAN = 0, HLE_REGION_USA = 1, HLE_REGION_EUROPE = 2 };
 enum HleLanguage { HLE_LANG_JAPANESE = 0, HLE_LANG_ENGLISH, HLE_LANG_GERMAN, HLE_LANG_FRENCH, HLE_LANG_SPANISH, HLE_LANG_ITALIAN };
 
+void hle_bios_init(void);
 void hle_bios_install(int region, int language);
+void hle_bios_uninstall(void);
+int hle_bios_installed(void);
 void hle_bios_reset(void);
+int hle_bios_in_ram(void);
+int hle_bios_first_event(void);
+void hle_bios_after_load(void);
 int hle_bios_boot_status(void);
 
 void hle_descramble(const u8 *src, u8 *dst, u32 size);

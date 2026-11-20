@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "ta_scene.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -20,6 +21,50 @@
 static u32 vram32_read32(u32 off32)
 {
     return buf_r32(g_vram, vram_offset64(off32 & 0x007FFFFCu));
+}
+
+static u32 reg_of(const u32 *regs, u32 addr);
+
+void ta_region_rect(const u32 *regs, int *x0, int *y0, int *x1, int *y1)
+{
+    u32 base = reg_of(regs, 0x005F802C) & 0x007FFFFCu, glob = reg_of(regs, 0x005F813C);
+    int type1 = !((reg_of(regs, 0x005F807C) >> 21) & 1), i, n;
+    u32 size = type1 ? 20u : 24u, addr = base, t;
+    int gw = (int)((glob & 0x3F) + 1) * 32, gh = (int)(((glob >> 16) & 0xF) + 1) * 32;
+    int empty = 1;
+    for (i = type1 ? 4 : 5; i > 0; i--)
+        if (!(vram32_read32(base + (u32)i * 4) & 0x80000000u))
+        {
+            empty = 0;
+            break;
+        }
+    if (empty) addr += size;
+    if (vram32_read32(addr) & 0x20000000u) size = 24;
+    *x0 = gw;
+    *y0 = gh;
+    *x1 = 0;
+    *y1 = 0;
+    for (n = 0; n < 3000; n++)
+    {
+        int tx, ty;
+        t = vram32_read32(addr);
+        tx = (int)((t >> 2) & 0x3F) * 32;
+        ty = (int)((t >> 8) & 0x3F) * 32;
+        if (tx < *x0) *x0 = tx;
+        if (ty < *y0) *y0 = ty;
+        if (tx + 32 > *x1) *x1 = tx + 32;
+        if (ty + 32 > *y1) *y1 = ty + 32;
+        if (t & 0x80000000u) break;
+        addr += size;
+    }
+    if (*x1 > gw) *x1 = gw;
+    if (*y1 > gh) *y1 = gh;
+    if (*x0 >= *x1 || *y0 >= *y1)
+    {
+        *x0 = *y0 = 0;
+        *x1 = gw;
+        *y1 = gh;
+    }
 }
 
 static f32 fl(u32 bits)
@@ -294,9 +339,21 @@ static void decode_sprite(TaScene *s, const u32 *p, const Header *h)
     v = add_vertex(s); \
     if (!v) return; \
     v->x = X; v->y = Y; v->z = Z; v->u = U; v->v = V; v->base = h->spriteBase; v->offset = h->spriteOffset;     note_z(s, v->z);
+    f32 dz = az + cz - bz, du = au + cu - bu, dv = av + cv - bv;
+    {
+        double abx = (double)bx - ax, aby = (double)by - ay, acx = (double)cx - ax, acy = (double)cy - ay;
+        double apx = (double)dx - ax, apy = (double)dy - ay, det = abx * acy - aby * acx;
+        if (det != 0.0)
+        {
+            double kb = (apx * acy - apy * acx) / det, kc = (abx * apy - aby * apx) / det;
+            dz = (f32)(az + kb * ((double)bz - az) + kc * ((double)cz - az));
+            du = (f32)(au + kb * ((double)bu - au) + kc * ((double)cu - au));
+            dv = (f32)(av + kb * ((double)bv - av) + kc * ((double)cv - av));
+        }
+    }
     SPRITE_VERTEX(ax, ay, az, au, av);
     SPRITE_VERTEX(bx, by, bz, bu, bv);
-    SPRITE_VERTEX(dx, dy, az + cz - bz, au + cu - bu, av + cv - bv);
+    SPRITE_VERTEX(dx, dy, dz, du, dv);
     SPRITE_VERTEX(cx, cy, cz, cu, cv);
 #undef SPRITE_VERTEX
 }
@@ -306,6 +363,29 @@ static u32 reg_of(const u32 *regs, u32 addr)
     return regs ? regs[(addr - 0x005F8000u) >> 2] : pvr_reg(addr);
 }
 
+static u32 background_fog(const u32 *regs, u32 tsp, u32 color, f32 invW)
+{
+    u32 mode = (tsp >> 22) & 3, den = reg_of(regs, 0x005F80B8), col = reg_of(regs, 0x005F80B0) & 0xFFFFFFu;
+    u32 entry, idx, k, r, g, b;
+    f32 z, m, f;
+    int e;
+    if (mode != 0 && mode != 3) return color;
+    z = (f32)((den >> 8) & 0xFF) / 128.0f * (f32)ldexp(1.0, (int)(s8)(den & 0xFF)) * invW;
+    if (!(z >= 1.0f)) z = 1.0f;
+    if (z > 255.9999f) z = 255.9999f;
+    m = frexpf(z, &e) * 32.0f - 16.0f;
+    idx = (u32)m + (u32)(e - 1) * 16;
+    if (idx > 127) idx = 127;
+    f = m - floorf(m);
+    entry = reg_of(regs, 0x005F8200 + idx * 4);
+    k = (u32)(((entry >> 8) & 0xFF) * (1.0f - f) + (entry & 0xFF) * f + 0.5f);
+    if (mode == 3) return (k << 24) | col;
+    r = (((color >> 16) & 255) * (255 - k) + ((col >> 16) & 255) * k + 127) / 255;
+    g = (((color >> 8) & 255) * (255 - k) + ((col >> 8) & 255) * k + 127) / 255;
+    b = ((color & 255) * (255 - k) + (col & 255) * k + 127) / 255;
+    return (color & 0xFF000000u) | (r << 16) | (g << 8) | b;
+}
+
 static void decode_background(TaScene *s, const u32 *regs)
 {
     u32 tagReg = reg_of(regs, 0x005F808C), base = reg_of(regs, 0x005F8020) & 0x00F00000u;
@@ -313,7 +393,9 @@ static void decode_background(TaScene *s, const u32 *regs)
     u32 skip = (tagReg >> 24) & 7, vertexStart = addr + 12, colorWord = 3 + ((isp >> 25) & 1 ? 2 : 0);
     (void)skip;
     s->bgColor = vram32_read32(vertexStart + colorWord * 4);
-    s->bgDepth = fl(reg_of(regs, 0x005F8088));
+    s->bgColorFog = background_fog(regs, vram32_read32(addr + 4), s->bgColor, fl(reg_of(regs, 0x005F8088)));
+    s->bgDepth = fl(reg_of(regs, 0x005F8088)) - 1e-6f;
+    if (!(s->bgDepth >= 1e-11f)) s->bgDepth = 1e-11f;
 }
 
 int g_ta_trans_always_last;

@@ -78,6 +78,51 @@ void flash_write(u32 addr, u32 value, int size)
     }
 }
 
+#define SYS_PART 0x1C000u
+#define SYS_PART_SIZE 0x4000u
+
+static u16 block_crc(u32 off)
+{
+    u32 n = 0xFFFF, i, c;
+    for (i = 0; i < 62; i++)
+    {
+        n ^= (u32)buf_r8(g_flash, off + i) << 8;
+        for (c = 0; c < 8; c++) n = (n & 0x8000) ? (n << 1) ^ 4129 : n << 1;
+    }
+    return (u16)~n;
+}
+
+void flash_set_date(u32 rtcSeconds)
+{
+    u32 bitmap = SYS_PART + SYS_PART_SIZE - 64, used = 0, i;
+    while (used < 254 && !(buf_r8(g_flash, bitmap + used / 8) & (0x80u >> (used % 8)))) used++;
+    for (i = used; i > 0; i--)
+    {
+        u32 off = SYS_PART + i * 64, crc;
+        if (buf_r8(g_flash, off) != 5 || buf_r8(g_flash, off + 1) != 0) continue;
+        buf_w8(g_flash, off + 2, (u8)rtcSeconds);
+        buf_w8(g_flash, off + 3, (u8)(rtcSeconds >> 8));
+        buf_w8(g_flash, off + 4, (u8)(rtcSeconds >> 16));
+        buf_w8(g_flash, off + 5, (u8)(rtcSeconds >> 24));
+        crc = block_crc(off);
+        buf_w8(g_flash, off + 62, (u8)crc);
+        buf_w8(g_flash, off + 63, (u8)(crc >> 8));
+        return;
+    }
+    LOG_WARN("[flash] no settings block: the BIOS will ask for the date");
+}
+
+void flash_set_region(int region)
+{
+    u32 copy;
+    if (region < 0 || region > 2) return;
+    for (copy = 0x1A000u; copy <= 0x1A0A0u; copy += 0xA0u)
+    {
+        buf_w8(g_flash, copy + 2, (u8)('0' + region));
+        buf_w8(g_flash, copy + 4, (u8)(region == 2 ? '1' : '0'));
+    }
+}
+
 void flash_state(StateIO *io)
 {
     state_tag(io, "FLSH");

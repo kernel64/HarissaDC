@@ -1,5 +1,76 @@
 # Changes
 
+## 0.3.0 (2026-11-20)
+
+**Warning about achievements**: HarissaDC gives its own Xbox 360 achievements, written to
+your Xbox profile. Achievements from a homebrew title on a profile that is used online can
+get the account banned. If your profile goes online, do not use it with HarissaDC: use an
+offline profile.
+
+**New**
+
+- Major rendering update, for every game: both renderers (the GPU renderer and the software
+  one) were checked against each other on hundreds of test scenes, and the differences found
+  were fixed: depth tests, polygon edges, clipping, shadows (modifier volumes), transparent
+  and cut-out polygons, fog (the background's too), shading, bump mapping, render to texture
+  (pictures that games draw into a texture), split screens and sprites. Many glitches in
+  many games are gone.
+- Achievements: RetroAchievements (off by default) in **Settings > Achievements**: sign in
+  with the Xbox keyboard, achievements unlock as you play (softcore), with their badge and a
+  notification; the in-game menu lists the game's achievements, unlocked ones first.
+  HarissaDC also has its own Xbox 360 achievements (23, 1000 G), earned with your
+  RetroAchievements progress (see the warning above). Achievements pause while a cheat is on.
+- Cheats: the Dreamcast cheat database (libretro) is included in the `cheats` folder; turn
+  cheats on and off from the in-game menu. Your own `.cht` or `.txt` files go in the same
+  folder.
+- Settings sorted into pages: Picture, Effects, Controls, Interface, Achievements and
+  Advanced, from the game list and from the in-game menu.
+- CDI disc images (DiscJuggler).
+- Each game has its own memory card (`saves\vmu\`). **Settings > Advanced > Memory card**
+  keeps one shared card instead.
+- Controls: the sticks' directions can be given to any Dreamcast button or to the D-pad, and
+  **Stick as D-pad** plays games made for the D-pad (Dino Crisis) with a stick.
+- **Internal resolution** (Picture page): 1.5x (default) or 1x.
+- The FPS display can show a panel with FPS, speed, CPU, RAM and resolution.
+- Sega's BIOS (optional): copy your own Dreamcast BIOS (`dc_boot.bin` and `dc_flash.bin`)
+  to the `HarissaDC\bios` folder and choose **Sega's** or **Sega's when present** in
+  **Settings > Advanced > BIOS**: games then start with the Dreamcast's boot animation, as on
+  the real console. Discs of every region start with it, and save states load whatever BIOS
+  made them. HarissaDC's built-in BIOS stays the default: no BIOS file is needed.
+- **Advanced**: audio margin.
+- Consoles with a debugger attached (development tools) get a warning screen instead of a
+  game frozen at its start.
+
+**Faster**
+
+- CPU emulation: Dragon Riders runs about 14% faster in its heavy scenes (about 44 fps,
+  38 before), Unreal Tournament's split screen about 12% faster (about 35 fps, 32 before);
+  other games gain too.
+- Draconus: its forest now runs at full speed (about 26 fps before; the game shows fewer
+  pictures, at its own pace).
+- Ikaruga's logo runs at full speed; Grandia II's opening and first forest are faster.
+
+**Fixed**
+
+- Rendering in every game: see the rendering update above.
+- Dragon Riders: after the first dialogue, the hero walked on the spot against the bed.
+- Draconus: a dark blue sky and background instead of the fog.
+- Wacky Races: black triangles over the menu panels.
+- Unreal Tournament: the split screen showed only one player.
+- Vigilante 8 2nd Offense: black panels in the menus.
+- Yu Suzuki Game Works: black picture in its arcade games.
+- Berserk: the ground and rocks behind the soldiers were wrongly shadowed.
+- Rayman 2: dark wedges on the ground.
+- Evil Twin no longer stops at its start.
+- Loading a save state in a second game of the same session could freeze it.
+- Some settings (vibration, V-Sync, texture filter, language...) could be lost when saved.
+
+**Known issues**
+
+- Windows CE games (Sega Rally 2, Worms World Party, Resident Evil 2...) are still slow in
+  places.
+- Unreal Tournament and Dragon Riders are below 60 fps in their heavy scenes.
+
 ## 0.2.2 (2026-11-06)
 
 **Faster**

@@ -12,8 +12,14 @@ enum { PADIN_A, PADIN_B, PADIN_X, PADIN_Y, PADIN_START, PADIN_L, PADIN_R, PADIN_
 enum
 {
     PADSRC_NONE, PADSRC_A, PADSRC_B, PADSRC_X, PADSRC_Y, PADSRC_LB, PADSRC_RB, PADSRC_LT, PADSRC_RT, PADSRC_START,
-    PADSRC_LS, PADSRC_RS, PADSRC_DUP, PADSRC_DDOWN, PADSRC_DLEFT, PADSRC_DRIGHT, PADSRC_COUNT
+    PADSRC_LS, PADSRC_RS, PADSRC_DUP, PADSRC_DDOWN, PADSRC_DLEFT, PADSRC_DRIGHT,
+    PADSRC_LSUP, PADSRC_LSDOWN, PADSRC_LSLEFT, PADSRC_LSRIGHT, PADSRC_RSUP, PADSRC_RSDOWN, PADSRC_RSLEFT, PADSRC_RSRIGHT,
+    PADSRC_COUNT
 };
+enum { PAD_STICK_LEFT = 0, PAD_STICK_RIGHT = 1, PAD_STICK_NONE = 2 };
+u32 config_stick_dirs(int x, int y);
+int config_pad_stick_dpad(const u32 map[PADIN_COUNT]);
+void config_pad_set_stick_dpad(u32 map[PADIN_COUNT], int stick);
 const char *config_pad_source_key(int src);
 const char *config_pad_source_name(int src);
 const char *config_pad_input_name(int in);
@@ -41,6 +47,7 @@ struct Config
     int gunHpos;
     int mmuSq;
     int renderWait;
+    int fbReadback;
     int cable;
     int taSkip;
     int audioMs;
@@ -65,6 +72,7 @@ struct Config
     int transSort;
     int modVols;
     int countdown;
+    int palShader;
     int exactDepth;
     int hugeDepth;
     int transDepth;
@@ -75,12 +83,15 @@ struct Config
     int gpuDump, gpuDumpCount;
     int sceneDumpCount, sceneDumpEvery;
     int gpuDisplay;
+    int wavDump, wavDumpAt;
     int showFps;
     int vsync;
     int texFilter;
+    int renderScale;
     int artAll;
     int updateCheck;
     int rumble;
+    int vmuShared;
     int lightGun;
     int rotate;
     int artDownload;
@@ -101,9 +112,18 @@ struct Config
     int padInvert[PAD_PLAYERS];
     char lastGame[CONFIG_PATH_MAX];
     int autoBoot;
+    char renderTest[CONFIG_PATH_MAX];
+    char cheats[256];
+    int cheatOn;
+    int achievements;
+    int raTest;
+    int raToast;
+    int achAt;
+    int noNet;
     char disc[CONFIG_PATH_MAX];
     char dumpBlocks[CONFIG_PATH_MAX];
     int dumpBlocksAt;
+    int jitTrail;
     int jitMap;
 };
 

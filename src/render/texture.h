@@ -16,6 +16,8 @@ struct TexDesc
 
 u32 tex_twiddle(u32 x, u32 y, u32 w, u32 h);
 
+u32 tex_palette_color(u32 raw, u32 palFormat);
+
 int tex_decode(const TexDesc *d, const u8 *vram, const u32 *palette, u32 *out);
 
 int tex_rect_ok(const TexDesc *d);

@@ -20,10 +20,12 @@ Your reports fill this list: open an issue with the game, its format and what yo
 | Street Fighter III: 3rd Strike | Playable | Console | 60 fps. |
 | Sonic Adventure | Playable | Console | 60 fps. |
 | Sonic Adventure 2 | Starts | Console | Menus at 60 fps; game not checked yet. |
-| Unreal Tournament | | | |
+| Dragon Riders: Chronicles of Pern | Slow | Console | About 43 fps in heavy scenes, 60 elsewhere. |
+| Draconus: Cult of the Wyrm | Playable | Console | The forest at full speed (fewer pictures, at the game's own pace). |
+| Unreal Tournament | Slow | Console | Split screen about 35 fps. |
 | Resident Evil Code: Veronica | | | |
 | Quake III Arena | | | |
-| Sega Rally 2 | | | |
+| Sega Rally 2 | Slow | Console | Windows CE game: races about 45-50 fps, menus about 40 fps. |
 | Resident Evil 3: Nemesis | | | |
 | Grand Theft Auto 2 | | | |
 | Resident Evil 2 | | | |

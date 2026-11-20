@@ -119,7 +119,14 @@ static void mark_insns(u32 off, u32 bytes)
 
 void sh4_jit_note_literal(u32 addr, u32 bytes)
 {
-    mark_code(addr & (RAM_SIZE - 1), bytes);
+    u32 off = addr & (RAM_SIZE - 1);
+    u8 bit = (u8)(1u << ((off >> 9) & 7));
+    mark_code(off, bytes);
+    if (!(s_pages[off >> 12] & bit))
+    {
+        s_pages[off >> 12] |= bit;
+        sh4_mmu_code_changed(off & ~4095u);
+    }
 }
 
 int sh4_jit_literal_written(u32 addr)
@@ -563,7 +570,7 @@ static int countdown_reg(const u8 *before)
     return k;
 }
 
-#define CD_WINDOW 1024
+#define CD_WINDOW 2048
 static int countdown_verify(u32 pc, int k, s16 *cdOff, u16 *cdTurn)
 {
     u8 before[IDLE_STATE_SIZE];
@@ -573,8 +580,8 @@ static int countdown_verify(u32 pc, int k, s16 *cdOff, u16 *cdTurn)
     memcpy(before, &g_sh4, IDLE_STATE_SIZE);
     lo = (sp & ~3u) > CD_WINDOW * 2 ? (sp & ~3u) - CD_WINDOW * 2 : 0;
     for (i = 0; i < CD_WINDOW; i++) s_stack[i] = mem_read32(lo + i * 4);
-    g_mem_watch_lo = sp > 4096 ? sp - 4096 : 0;
-    g_mem_watch_hi = sp + 4096;
+    g_mem_watch_lo = lo;
+    g_mem_watch_hi = lo + CD_WINDOW * 4;
     g_mem_watch_bad = 0;
     g_mem_watch = 1;
     for (steps = 0; steps < 4096; steps++)
@@ -591,14 +598,16 @@ static int countdown_verify(u32 pc, int k, s16 *cdOff, u16 *cdTurn)
     {
         *cdOff = CD_NO_COPY;
         *cdTurn = (u16)(steps + 1);
-        for (i = 0; i < CD_WINDOW; i++)
+        for (i = 0; i < CD_WINDOW && ok; i++)
         {
             u32 v = mem_read32(lo + i * 4);
+            if (v == s_stack[i]) continue;
             if (v == g_sh4.r[k] && s_stack[i] == v + 1)
             {
-                *cdOff = (s16)(s32)(lo + i * 4 - sp);
-                break;
+                if (*cdOff == CD_NO_COPY) *cdOff = (s16)(s32)(lo + i * 4 - sp);
             }
+            else
+                ok = 0;
         }
     }
     return ok;

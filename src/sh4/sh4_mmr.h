@@ -38,6 +38,7 @@ void sh4_p4_write(u32 addr, u32 value, int size);
 
 u32 sh4_ocram_read(u32 addr, int size);
 u8 *sh4_ocram_bytes(void);
+u8 **sh4_ocram_ptr(void);
 int sh4_ocram_simple(void);
 void sh4_ocram_write(u32 addr, u32 value, int size);
 

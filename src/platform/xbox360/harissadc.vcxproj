@@ -53,6 +53,7 @@
     </Link>
     <ImageXex>
       <ConfigurationFile>title\xex.xml</ConfigurationFile>
+      <AdditionalSections>44430360=$(OutDir)spa.bin</AdditionalSections>
     </ImageXex>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Xbox 360'">
@@ -104,6 +105,10 @@
     <ClCompile Include="xb_png.cpp" />
     <ClCompile Include="xb_art.cpp" />
     <ClCompile Include="xb_update.cpp" />
+    <ClCompile Include="xb_ach.cpp" />
+    <ClCompile Include="xb_ra.cpp">
+      <AdditionalIncludeDirectories>..\..\third_party\rcheevos\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
     <ClCompile Include="xb_net.cpp">
       <AdditionalIncludeDirectories>..\..\third_party\bearssl\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
@@ -116,6 +121,12 @@
     <ClCompile Include="..\..\third_party\zlib\adler32.c;..\..\third_party\zlib\crc32.c;..\..\third_party\zlib\inffast.c;..\..\third_party\zlib\inflate.c;..\..\third_party\zlib\inftrees.c;..\..\third_party\zlib\zutil.c">
       <CompileAs>CompileAsC</CompileAs>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
+    </ClCompile>
+    <ClCompile Include="..\..\third_party\rcheevos\src\**\*.c;..\..\third_party\rcheevos\xbox\rc_xbox_snprintf.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <AdditionalIncludeDirectories>..\..\third_party\rcheevos\xbox;..\..\third_party\rcheevos\include;..\..\third_party\rcheevos\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>RC_DISABLE_LUA;snprintf=rc_xbox_snprintf;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ClCompile Include="..\..\third_party\soundtouch\*.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
@@ -143,6 +154,14 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="title\xex.xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="title\harissadc.gameconfig">
+      <Message>Build SPA file from %(FullPath)</Message>
+      <Command>"$(XEDK)\bin\win32\spac.exe" -nologo -noh -forceoverwrite -o "$(OutDir)spa.bin" "%(FullPath)"</Command>
+      <AdditionalInputs>title\art\icon.png</AdditionalInputs>
+      <Outputs>$(OutDir)spa.bin</Outputs>
+    </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -8,6 +8,7 @@
 
 void soft_render_install(void);
 void soft_render_frame(void);
+extern const char *g_soft_dump_path;
 const u32 *soft_render_image(int *w, int *h);
 
 #endif

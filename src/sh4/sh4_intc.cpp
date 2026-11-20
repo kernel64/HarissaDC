@@ -46,10 +46,19 @@ static int level_of(int irq)
     return (ipr >> i->shift) & 15;
 }
 
+static u32 s_bestKeyPending = ~0u, s_bestKeyIpr0, s_bestKeyIpr1;
+static int s_bestIrq = -1, s_bestLevel;
+
 static int best_pending(int *levelOut)
 {
     int irq, best = -1, bestLevel = 0;
+    u32 ipr0 = ((u32)g_intc.ipra << 16) | g_intc.iprb, ipr1 = g_intc.iprc;
     if (!s_pending) return -1;
+    if (s_pending == s_bestKeyPending && ipr0 == s_bestKeyIpr0 && ipr1 == s_bestKeyIpr1)
+    {
+        *levelOut = s_bestLevel;
+        return s_bestIrq;
+    }
     for (irq = 0; irq < SH4_IRQ_COUNT; irq++)
     {
         if (s_pending & (1u << irq))
@@ -62,6 +71,11 @@ static int best_pending(int *levelOut)
             }
         }
     }
+    s_bestKeyPending = s_pending;
+    s_bestKeyIpr0 = ipr0;
+    s_bestKeyIpr1 = ipr1;
+    s_bestIrq = best;
+    s_bestLevel = bestLevel;
     *levelOut = bestLevel;
     return best;
 }

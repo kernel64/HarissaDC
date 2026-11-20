@@ -8,6 +8,7 @@
 
 #include "../../core/config.h"
 #include "../../core/log.h"
+#include "xb_pvr.h"
 
 struct PadEvent
 {
@@ -16,10 +17,12 @@ struct PadEvent
     BYTE lt, rt;
     int axis;
     int value;
+    DWORD user;
 };
 
 static PadEvent s_events[128];
 static int s_count, s_active;
+static u32 s_users;
 static LARGE_INTEGER s_start, s_freq;
 
 static DWORD now_ms(void)
@@ -29,7 +32,7 @@ static DWORD now_ms(void)
     return (DWORD)((t.QuadPart - s_start.QuadPart) * 1000 / s_freq.QuadPart);
 }
 
-int XbPadScript(const char *text)
+static int parse_events(const char *text, DWORD base)
 {
     static const struct { const char *name; WORD bit; } names[] = {
         { "A", XINPUT_GAMEPAD_A }, { "B", XINPUT_GAMEPAD_B }, { "X", XINPUT_GAMEPAD_X }, { "Y", XINPUT_GAMEPAD_Y },
@@ -38,10 +41,7 @@ int XbPadScript(const char *text)
         { "DL", XINPUT_GAMEPAD_DPAD_LEFT }, { "DR", XINPUT_GAMEPAD_DPAD_RIGHT }, { "LS", XINPUT_GAMEPAD_LEFT_THUMB },
         { "RS", XINPUT_GAMEPAD_RIGHT_THUMB } };
     const char *p = text;
-    s_count = 0;
-    s_active = 0;
-    QueryPerformanceFrequency(&s_freq);
-    QueryPerformanceCounter(&s_start);
+    int added = 0;
     while (p && *p && s_count < (int)(sizeof(s_events) / sizeof(s_events[0])))
     {
         PadEvent *e = &s_events[s_count];
@@ -49,12 +49,19 @@ int XbPadScript(const char *text)
         int n = 0;
         unsigned i;
         memset(e, 0, sizeof(*e));
-        while (*p == ' ') p++;
+        while (*p == ' ' || *p == '\r' || *p == '\n') p++;
+        if (!*p) break;
+        if (*p >= '1' && *p <= '4' && p[1] == ':')
+        {
+            e->user = (DWORD)(*p - '1');
+            p += 2;
+        }
+        s_users |= 1u << e->user;
         while (*p && *p != '@' && *p != '=' && n < 15) name[n++] = *p++;
         name[n] = 0;
         if (*p == '=')
         {
-            e->axis = !strcmp(name, "LX") ? 1 : !strcmp(name, "LY") ? 2 : 0;
+            e->axis = !strcmp(name, "LX") ? 1 : !strcmp(name, "LY") ? 2 : !strcmp(name, "RX") ? 3 : !strcmp(name, "RY") ? 4 : 0;
             e->value = (int)strtol(p + 1, (char **)&p, 10);
         }
         else if (!strcmp(name, "LT"))
@@ -67,19 +74,33 @@ int XbPadScript(const char *text)
         if (!e->buttons && !e->axis && !e->lt && !e->rt)
         {
             LOG_ERROR("[pad] script: bad event \"%s\"", name);
-            s_count = 0;
             return -1;
         }
         if (*p != '@')
         {
             LOG_ERROR("[pad] script: event \"%s\" needs @milliseconds", name);
-            s_count = 0;
             return -1;
         }
-        e->first = e->last = (DWORD)strtoul(p + 1, (char **)&p, 10);
-        if (*p == '-') e->last = (DWORD)strtoul(p + 1, (char **)&p, 10);
+        e->first = e->last = base + (DWORD)strtoul(p + 1, (char **)&p, 10);
+        if (*p == '-') e->last = base + (DWORD)strtoul(p + 1, (char **)&p, 10);
         if (*p == ',') p++;
         s_count++;
+        added++;
+    }
+    return added;
+}
+
+int XbPadScript(const char *text)
+{
+    s_count = 0;
+    s_active = 0;
+    s_users = 1;
+    QueryPerformanceFrequency(&s_freq);
+    QueryPerformanceCounter(&s_start);
+    if (parse_events(text, 0) < 0)
+    {
+        s_count = 0;
+        return -1;
     }
     s_active = s_count > 0;
     if (s_active) LOG_INFO("[pad] scripted controller: %d events", s_count);
@@ -95,23 +116,54 @@ void XbPadGameStarts(void)
     LOG_INFO("[pad] script clock starts with the game");
 }
 
+static void live_commands(DWORD now)
+{
+    static DWORD lastPoll;
+    char text[512];
+    HANDLE h;
+    DWORD got = 0;
+    int i, k;
+    if (now - lastPoll < 500) return;
+    lastPoll = now;
+    h = CreateFileA("game:\\padcmd.txt", GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    if (!ReadFile(h, text, sizeof(text) - 1, &got, NULL)) got = 0;
+    CloseHandle(h);
+    DeleteFileA("game:\\padcmd.txt");
+    text[got] = 0;
+    if (!strncmp(text, "gpudump ", 8))
+    {
+        xb_pvr_dump_frames(atoi(text + 8));
+        LOG_INFO("[pad] live commands: gpudump %d", atoi(text + 8));
+        return;
+    }
+    for (i = k = 0; i < s_count; i++)
+        if (s_events[i].last >= now) s_events[k++] = s_events[i];
+    s_count = k;
+    k = parse_events(text, now);
+    LOG_INFO("[pad] live commands at %u ms: %d events", now, k);
+}
+
 DWORD XbPadGet(DWORD user, XINPUT_STATE *state)
 {
     DWORD now;
     int i;
     if (!s_active) return XInputGetState(user, state);
     memset(state, 0, sizeof(*state));
-    if (user != 0) return ERROR_DEVICE_NOT_CONNECTED;
     now = now_ms();
+    if (user == 0) live_commands(now);
+    if (user > 3 || !((s_users >> user) & 1)) return ERROR_DEVICE_NOT_CONNECTED;
     state->dwPacketNumber = now;
     for (i = 0; i < s_count; i++)
-        if (now >= s_events[i].first && now <= s_events[i].last)
+        if (s_events[i].user == user && now >= s_events[i].first && now <= s_events[i].last)
         {
             state->Gamepad.wButtons |= s_events[i].buttons;
             if (s_events[i].lt) state->Gamepad.bLeftTrigger = s_events[i].lt;
             if (s_events[i].rt) state->Gamepad.bRightTrigger = s_events[i].rt;
             if (s_events[i].axis == 1) state->Gamepad.sThumbLX = (SHORT)s_events[i].value;
             if (s_events[i].axis == 2) state->Gamepad.sThumbLY = (SHORT)s_events[i].value;
+            if (s_events[i].axis == 3) state->Gamepad.sThumbRX = (SHORT)s_events[i].value;
+            if (s_events[i].axis == 4) state->Gamepad.sThumbRY = (SHORT)s_events[i].value;
         }
     return ERROR_SUCCESS;
 }
@@ -124,6 +176,8 @@ int XbPadSource(const XINPUT_GAMEPAD *g, int src)
                                             XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT };
     if (src == PADSRC_LT) return g->bLeftTrigger;
     if (src == PADSRC_RT) return g->bRightTrigger;
+    if (src >= PADSRC_LSUP && src <= PADSRC_LSRIGHT) return (config_stick_dirs(g->sThumbLX, g->sThumbLY) >> (src - PADSRC_LSUP)) & 1 ? 255 : 0;
+    if (src >= PADSRC_RSUP && src <= PADSRC_RSRIGHT) return (config_stick_dirs(g->sThumbRX, g->sThumbRY) >> (src - PADSRC_RSUP)) & 1 ? 255 : 0;
     if (src <= PADSRC_NONE || src >= PADSRC_COUNT) return 0;
     return (g->wButtons & bits[src]) ? 255 : 0;
 }

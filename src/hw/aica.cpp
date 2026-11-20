@@ -409,6 +409,9 @@ u32 g_aica_rms[16], g_aica_rms_count;
 static u64 s_rmsSum;
 static u32 s_rmsN;
 
+s16 *g_aica_dump;
+u32 g_aica_dump_cap, g_aica_dump_n, g_aica_dump_skip;
+
 static void mix_sample(void)
 {
     s32 left = 0, right = 0;
@@ -489,6 +492,16 @@ static void mix_sample(void)
             g_aica_rms_count++;
             s_rmsSum = 0;
             s_rmsN = 0;
+        }
+    }
+    if (g_aica_dump)
+    {
+        if (g_aica_dump_skip) g_aica_dump_skip--;
+        else if (g_aica_dump_n < g_aica_dump_cap)
+        {
+            g_aica_dump[g_aica_dump_n * 2] = (s16)left;
+            g_aica_dump[g_aica_dump_n * 2 + 1] = (s16)right;
+            g_aica_dump_n++;
         }
     }
     if (s_out && s_outWrite - s_outRead < OUT_FRAMES)

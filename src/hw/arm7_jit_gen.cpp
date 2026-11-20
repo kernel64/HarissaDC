@@ -664,6 +664,7 @@ static int emit_insn(Gen *g, u32 op)
     {
         u32 rd = (op >> 12) & 15;
         int ends;
+        g->cycles -= ARM7_INSN_CYCLES - 1;
         if (skip >= 0)
         {
             ppc_patch_here(c, (u32)skip);
@@ -711,6 +712,7 @@ u32 arm7_jit_gen_block(PpcCode *c, u32 pc, Arm7JitGenInfo *info)
     {
         u32 op = buf_r32(g_aram, (pc + n * 4) & (ARAM_SIZE - 1) & ~3u);
         g.pc = pc + n * 4;
+        g.cycles += ARM7_INSN_CYCLES - 1;
         if (!emit_insn(&g, op)) return pc + (n + 1) * 4;
         if (c->overflow) return 0;
     }

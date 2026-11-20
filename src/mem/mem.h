@@ -23,6 +23,8 @@
 extern u8 *g_ram, *g_vram, *g_aram, *g_bios, *g_flash;
 #define MEM_WINDOW_SIZE 0x20000000u
 #define MEM_WINDOW_RAM 0x0C000000u
+#define MEM_WINDOW_OCRAM 0x1C001000u
+u8 *mem_window_ocram(int commit);
 extern u8 *g_mem_window;
 
 static __inline u8 buf_r8(const u8 *b, u32 off) { return b[off ^ MEM_SWZ8]; }

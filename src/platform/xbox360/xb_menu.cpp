@@ -19,7 +19,10 @@
 #include "../../core/version.h"
 #include "../../disc/disc_info.h"
 #include "../../disc/game_files.h"
+#include "../../disc/redump.h"
+#include "xb_ach.h"
 #include "xb_fs.h"
+#include "xb_ra.h"
 #include "xb_ui.h"
 
 struct UiAnim
@@ -153,15 +156,22 @@ void UiMenuDraw(const UiMenu *m)
     if (m->count) selection_bar_side(x + 18, sy + 3, w - 36, rowH - 6, rtl);
     for (i = 0; i < m->count; i++)
     {
-        float cy = y + head + i * rowH + rowH * 0.5f;
+        float cy = y + head + i * rowH + rowH * 0.5f, ic = rowH - 12, shift = m->icon ? ic + 12 : 0;
         int s = i == m->sel;
+        if (m->icon)
+        {
+            IDirect3DTexture9 *t = m->icon(i);
+            float ix = rtl ? x + w - 44 - ic : x + 44;
+            UiRoundRect(ix, cy - ic * 0.5f, ic, ic, 7, D3DCOLOR_ARGB(255, 22, 23, 30), D3DCOLOR_ARGB(255, 22, 23, 30));
+            if (t) UiImage(t, ix, cy - ic * 0.5f, ic, ic, 7, D3DCOLOR_ARGB(255, 255, 255, 255));
+        }
         if (rtl)
         {
-            UiText(s ? UI_BOLD : UI_REGULAR, 22, x + w - 44, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, m->label[i], UI_RIGHT);
+            UiText(s ? UI_BOLD : UI_REGULAR, 22, x + w - 44 - shift, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, m->label[i], UI_RIGHT);
             if (m->value[i][0]) draw_value(x + 40 + value_width(m->value[i], s), cy, m->value[i], s);
             continue;
         }
-        UiText(s ? UI_BOLD : UI_REGULAR, 22, x + 44, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, m->label[i], UI_LEFT);
+        UiText(s ? UI_BOLD : UI_REGULAR, 22, x + 44 + shift, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, m->label[i], UI_LEFT);
         if (m->value[i][0]) draw_value(x + w - 40, cy, m->value[i], s);
     }
     UiRect(x + 24, y + h - foot, w - 48, 1, UI_COL_LINE);
@@ -175,8 +185,37 @@ void UiMenuNavigate(UiMenu *m, WORD down)
     if (down & XINPUT_GAMEPAD_DPAD_DOWN) m->sel = (m->sel + 1) % m->count;
 }
 
+static char s_notify[200], s_notifyBadge[24];
+static DWORD s_notifyAt, s_notifyMs;
+
+void UiNotify(const char *text, int ms, const char *badge)
+{
+    strncpy(s_notify, text, sizeof(s_notify) - 1);
+    s_notify[sizeof(s_notify) - 1] = 0;
+    strncpy(s_notifyBadge, badge ? badge : "", sizeof(s_notifyBadge) - 1);
+    s_notifyBadge[sizeof(s_notifyBadge) - 1] = 0;
+    s_notifyAt = GetTickCount();
+    s_notifyMs = (DWORD)ms;
+}
+
+int UiNotifyDraw(void)
+{
+    DWORD age = GetTickCount() - s_notifyAt;
+    if (!s_notify[0] || age >= s_notifyMs) return 0;
+    if (s_notifyBadge[0]) UiToastBadge(s_notify, XbRaBadge(s_notifyBadge), (float)age, (float)s_notifyMs);
+    else UiToast(s_notify, (float)age, (float)s_notifyMs);
+    return 1;
+}
+
+void UiServicePump(IDirect3DDevice9 *dev)
+{
+    XbRaPump();
+    XbRaBadgesPump(dev);
+}
+
 static void begin_frame(IDirect3DDevice9 *dev, UiBackgroundFn background, void *user)
 {
+    UiServicePump(dev);
     dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
     UiBegin(dev);
     if (background) background(user);
@@ -185,6 +224,7 @@ static void begin_frame(IDirect3DDevice9 *dev, UiBackgroundFn background, void *
 
 static void end_frame(IDirect3DDevice9 *dev)
 {
+    UiNotifyDraw();
     UiEnd();
     dev->Present(NULL, NULL, NULL, NULL);
 }
@@ -235,17 +275,19 @@ void SettingsLoad(Config *c, const char *path)
 
 int SettingsSave(const Config *c, const char *path, int withLastGame)
 {
-    char text[1024];
+    char text[4096];
     int n = config_write(c, withLastGame, text, sizeof(text));
     int r = write_text(path, text, n);
     if (r != 0) LOG_ERROR("[menu] cannot write %s", path);
     return r;
 }
 
-int SettingsSaveLang(const char *path, const char *code)
+int SettingsSaveLang(const char *path, const char *code) { return SettingsSaveKey(path, "lang", code); }
+
+int SettingsSaveKey(const char *path, const char *key, const char *value)
 {
     char *old = read_text(path), *out, *p;
-    int n = 0, r, size = (old ? (int)strlen(old) : 0) + 64;
+    int n = 0, r, klen = (int)strlen(key), size = (old ? (int)strlen(old) : 0) + klen + (int)strlen(value) + 8;
     out = (char *)malloc(size);
     if (!out)
     {
@@ -256,7 +298,7 @@ int SettingsSaveLang(const char *path, const char *code)
     {
         char *e = p + strcspn(p, "\r\n");
         int len = (int)(e - p);
-        if (len && _strnicmp(p, "lang=", 5) != 0)
+        if (len && !(len > klen && p[klen] == '=' && _strnicmp(p, key, klen) == 0))
         {
             memcpy(out + n, p, len);
             n += len;
@@ -265,7 +307,7 @@ int SettingsSaveLang(const char *path, const char *code)
         }
         p = e + strspn(e, "\r\n");
     }
-    n += _snprintf(out + n, size - n, "lang=%s\r\n", code);
+    n += _snprintf(out + n, size - n, "%s=%s\r\n", key, value);
     r = write_text(path, out, n);
     free(out);
     free(old);
@@ -279,10 +321,16 @@ void SettingsApplyLanguage(const Config *c)
     LangSet(l >= 0 ? l : LangFromConsole());
 }
 
+enum { PG_MAIN = 0, PG_PICTURE, PG_EFFECTS, PG_INTERFACE, PG_ACH, PG_ADVANCED, PG_COUNT };
 enum
 {
-    S_CPU = 1, S_RENDERER, S_FPS, S_GRAPHICS, S_CONTROLS, S_LANGUAGE, S_ART_DL, S_ART_ALL, S_SAVE_ALL, S_SAVE_GAME, S_BACK,
-    G_PRESET = 100, G_FORMAT, G_ROTATE, G_ZOOM, G_POSX, G_POSY, G_BRIGHT, G_VSYNC, G_TEXFILTER, G_SMOOTH, G_FXAA, G_SHARPEN, G_BLUR, G_SCREEN, G_BACK
+    S_PICTURE = 1, S_EFFECTS, S_CONTROLS, S_INTERFACE, S_ACH, S_ADVANCED, S_SAVE_ALL, S_SAVE_GAME, S_BACK,
+    S_RA_ON = 90, S_RA_ACCOUNT,
+    G_FORMAT = 100, G_ROTATE, G_BRIGHT, G_ZOOM, G_POSX, G_POSY,
+    G_PRESET, G_TEXFILTER, G_SMOOTH, G_FXAA, G_SHARPEN, G_BLUR, G_SCREEN,
+    S_LANGUAGE, S_FPS, S_ART_DL, S_ART_ALL,
+    S_CPU, S_RENDERER, S_BIOS, G_VSYNC, S_AUDIO, S_VMU,
+    G_RES
 };
 
 static const char *chev(int id)
@@ -310,6 +358,7 @@ static const char *source_name(int src)
     if (src == PADSRC_LS) return Tr(T_SRC_LS);
     if (src == PADSRC_RS) return Tr(T_SRC_RS);
     if (src >= PADSRC_DUP && src <= PADSRC_DRIGHT) return Tr(T_SRC_DUP + (src - PADSRC_DUP));
+    if (src >= PADSRC_LSUP && src <= PADSRC_RSRIGHT) return Tr(T_SRC_LSUP + (src - PADSRC_LSUP));
     return config_pad_source_name(src);
 }
 
@@ -334,47 +383,6 @@ static const char *arrows(char *buf, int size, const char *fmt, int v)
 
 static int s_fromList, s_artAll;
 
-static void settings_build(UiMenu *m, const Config *c, int perGame, int sel)
-{
-    char v[64];
-    UiMenuClear(m, Tr(T_SETTINGS), Tr(T_FOOT_SELECT));
-    UiMenuAdd(m, S_CPU, Tr(T_CPU_NEXT), chev(c->useJit ? T_RECOMPILER : T_INTERPRETER));
-    UiMenuAdd(m, S_RENDERER, Tr(T_RENDERER_NEXT), chev(c->gpuRender ? T_GPU : T_SOFTWARE));
-    {
-        static const int fpsLabels[4] = { T_OFF, T_FPS_ONLY, T_FPS_CPU, T_FPS_ALL };
-        UiMenuAdd(m, S_FPS, Tr(T_SHOW_FPS), chev(fpsLabels[c->showFps & 3]));
-    }
-    _snprintf(v, sizeof(v), LangRtl() ? "<  %s" : "%s  >", preset_name(xb_display_preset_of(c)));
-    v[sizeof(v) - 1] = 0;
-    UiMenuAdd(m, S_GRAPHICS, Tr(T_GRAPHICS), v);
-    {
-        u32 def[PADIN_COUNT];
-        int stick, in, p, custom = 0;
-        config_pad_defaults(def, &stick);
-        for (p = 0; p < PAD_PLAYERS; p++)
-        {
-            if (stick != c->padStick[p]) custom = 1;
-            for (in = 0; in < PADIN_COUNT; in++)
-                if (def[in] != c->padMap[p][in]) custom = 1;
-        }
-        _snprintf(v, sizeof(v), LangRtl() ? "<  %s" : "%s  >", Tr(custom ? T_CUSTOM : T_DEFAULT));
-        v[sizeof(v) - 1] = 0;
-        UiMenuAdd(m, S_CONTROLS, Tr(T_CONTROLS), v);
-    }
-    _snprintf(v, sizeof(v), LangRtl() ? "<  %s" : "%s  >", Tr(T_LANG_NAME));
-    v[sizeof(v) - 1] = 0;
-    UiMenuAdd(m, S_LANGUAGE, Tr(T_LANGUAGE), v);
-    if (s_fromList)
-    {
-        UiMenuAdd(m, S_ART_DL, Tr(T_ART_DOWNLOADS), onoff(c->artDownload));
-        UiMenuAdd(m, S_ART_ALL, Tr(T_ART_ALL), NULL);
-    }
-    UiMenuAdd(m, S_SAVE_ALL, Tr(T_SAVE_ALL), NULL);
-    if (perGame) UiMenuAdd(m, S_SAVE_GAME, Tr(T_SAVE_GAME), NULL);
-    UiMenuAdd(m, S_BACK, Tr(T_BACK), NULL);
-    m->sel = sel < m->count ? sel : 0;
-}
-
 static int format_of(const Config *c)
 {
     if (c->widescreen && c->gpuRender) return 1;
@@ -392,45 +400,129 @@ static int rotate_of(const Config *c)
     return c->rotate == 0 ? 1 : c->rotate == 90 ? 2 : c->rotate == 270 ? 3 : 0;
 }
 
-static void graphics_build(UiMenu *m, const Config *c, int sel)
+static const int s_audioSteps[] = { 40, 60, 80, 100, 120, 160, 200, 250, 300, 400, 500 };
+#define AUDIO_STEPS ((int)(sizeof(s_audioSteps) / sizeof(s_audioSteps[0])))
+
+static int audio_step_of(int ms)
 {
-    static const int levels[3] = { T_OFF, T_LOW, T_HIGH };
-    static const int blurs[3] = { T_OFF, T_SOFT, T_STRONG };
-    static const int bright[3] = { T_NORMAL, T_LIGHTER, T_MUCH_LIGHTER };
-    static const int screens[6] = { T_SCREEN_NONE, T_SCANLINES, T_CRT, T_CRT_CURVED, T_LCD_GRID, T_LIGHT_SCANLINES };
-    char v[32], pr[72];
-    UiMenuClear(m, Tr(T_GRAPHICS), Tr(T_FOOT_SELECT));
-    _snprintf(pr, sizeof(pr), "< %s >", preset_name(xb_display_preset_of(c)));
-    pr[sizeof(pr) - 1] = 0;
-    UiMenuAdd(m, G_PRESET, Tr(T_PRESET), pr);
+    int i, best = 4;
+    for (i = 0; i < AUDIO_STEPS; i++)
+        if (s_audioSteps[i] <= (ms > 0 ? ms : 120)) best = i;
+    return best;
+}
+
+static const char *opens(char *buf, int size, const char *summary)
+{
+    _snprintf(buf, size, LangRtl() ? "<  %s" : "%s  >", summary);
+    buf[size - 1] = 0;
+    return buf;
+}
+
+static int controls_custom(const Config *c)
+{
+    u32 def[PADIN_COUNT];
+    int stick, in, p;
+    config_pad_defaults(def, &stick);
+    for (p = 0; p < PAD_PLAYERS; p++)
     {
-        static const int formats[3] = { T_ASPECT_43, T_ASPECT_WIDE, T_ASPECT_STRETCH };
-        UiMenuAdd(m, G_FORMAT, Tr(T_ASPECT), chev(formats[format_of(c)]));
+        if (stick != c->padStick[p]) return 1;
+        for (in = 0; in < PADIN_COUNT; in++)
+            if (def[in] != c->padMap[p][in]) return 1;
     }
+    return 0;
+}
+
+static void settings_page(UiMenu *m, const Config *c, int page, int perGame, int sel)
+{
+    static const int titles[PG_COUNT] = { T_SETTINGS, T_PICTURE, T_EFFECTS, T_INTERFACE, T_ACHIEVEMENTS, T_ADVANCED };
+    static const int formats[3] = { T_ASPECT_43, T_ASPECT_WIDE, T_ASPECT_STRETCH };
+    char v[72];
+    int title = page == PG_MAIN && !perGame ? T_SETTINGS_ALL : titles[page];
+    UiMenuClear(m, Tr(title), Tr(T_FOOT_SELECT));
+    switch (page)
+    {
+    case PG_MAIN:
+        UiMenuAdd(m, S_PICTURE, Tr(T_PICTURE), opens(v, sizeof(v), Tr(formats[format_of(c)])));
+        UiMenuAdd(m, S_EFFECTS, Tr(T_EFFECTS), opens(v, sizeof(v), preset_name(xb_display_preset_of(c))));
+        UiMenuAdd(m, S_CONTROLS, Tr(T_CONTROLS), opens(v, sizeof(v), Tr(controls_custom(c) ? T_CUSTOM : T_DEFAULT)));
+        UiMenuAdd(m, S_INTERFACE, Tr(T_INTERFACE), opens(v, sizeof(v), Tr(T_LANG_NAME)));
+        UiMenuAdd(m, S_ACH, Tr(T_ACHIEVEMENTS), opens(v, sizeof(v), Tr(c->achievements ? T_ON : T_OFF)));
+        UiMenuAdd(m, S_ADVANCED, Tr(T_ADVANCED), opens(v, sizeof(v), Tr(c->gpuRender ? T_GPU : T_SOFTWARE)));
+        UiMenuAdd(m, S_SAVE_ALL, Tr(T_SAVE_ALL), NULL);
+        if (perGame) UiMenuAdd(m, S_SAVE_GAME, Tr(T_SAVE_GAME), NULL);
+        break;
+    case PG_PICTURE:
     {
         static const int orients[4] = { T_ORIENT_AUTO, T_ORIENT_NORMAL, T_ORIENT_90, T_ORIENT_270 };
+        static const int bright[3] = { T_NORMAL, T_LIGHTER, T_MUCH_LIGHTER };
+        UiMenuAdd(m, G_FORMAT, Tr(T_ASPECT), chev(formats[format_of(c)]));
+        if (c->gpuRender) UiMenuAdd(m, G_RES, Tr(T_RES_INTERNAL), chev(c->renderScale == 1 ? T_RES_1X : T_RES_15X));
         UiMenuAdd(m, G_ROTATE, Tr(T_ORIENTATION), chev(orients[rotate_of(c)]));
+        UiMenuAdd(m, G_BRIGHT, Tr(T_BRIGHTNESS), chev(bright[c->brightness >= 0 && c->brightness <= 2 ? c->brightness : 0]));
+        UiMenuAdd(m, G_ZOOM, Tr(T_PIC_SIZE), arrows(v, sizeof(v), "%d%%", c->zoom));
+        UiMenuAdd(m, G_POSX, Tr(T_PIC_LR), arrows(v, sizeof(v), "%d", c->posX));
+        UiMenuAdd(m, G_POSY, Tr(T_PIC_UD), arrows(v, sizeof(v), "%d", c->posY));
+        break;
     }
-    UiMenuAdd(m, G_ZOOM, Tr(T_PIC_SIZE), arrows(v, sizeof(v), "%d%%", c->zoom));
-    UiMenuAdd(m, G_POSX, Tr(T_PIC_LR), arrows(v, sizeof(v), "%d", c->posX));
-    UiMenuAdd(m, G_POSY, Tr(T_PIC_UD), arrows(v, sizeof(v), "%d", c->posY));
-    UiMenuAdd(m, G_BRIGHT, Tr(T_BRIGHTNESS), chev(bright[c->brightness >= 0 && c->brightness <= 2 ? c->brightness : 0]));
-    UiMenuAdd(m, G_VSYNC, Tr(T_VSYNC), c->vsync == 2 ? chev(T_VSYNC_STRICT) : onoff(c->vsync));
-    if (c->gpuRender)
+    case PG_EFFECTS:
     {
-        static const int filters[3] = { T_FILTER_GAME, T_FILTER_NEAREST, T_FILTER_BILINEAR };
-        UiMenuAdd(m, G_TEXFILTER, Tr(T_TEXFILTER), chev(filters[c->texFilter % 3]));
+        static const int levels[3] = { T_OFF, T_LOW, T_HIGH };
+        static const int blurs[3] = { T_OFF, T_SOFT, T_STRONG };
+        static const int screens[6] = { T_SCREEN_NONE, T_SCANLINES, T_CRT, T_CRT_CURVED, T_LCD_GRID, T_LIGHT_SCANLINES };
+        _snprintf(v, sizeof(v), "< %s >", preset_name(xb_display_preset_of(c)));
+        v[sizeof(v) - 1] = 0;
+        UiMenuAdd(m, G_PRESET, Tr(T_PRESET), v);
+        if (c->gpuRender)
+        {
+            static const int filters[3] = { T_FILTER_GAME, T_FILTER_NEAREST, T_FILTER_BILINEAR };
+            UiMenuAdd(m, G_TEXFILTER, Tr(T_TEXFILTER), chev(filters[c->texFilter % 3]));
+        }
+        UiMenuAdd(m, G_SMOOTH, Tr(T_SMOOTH_SCALING), onoff(c->smooth));
+        UiMenuAdd(m, G_FXAA, Tr(T_FXAA), onoff(c->fxaa));
+        UiMenuAdd(m, G_SHARPEN, Tr(T_SHARPEN), chev(levels[c->sharpen <= 2 ? c->sharpen : 0]));
+        UiMenuAdd(m, G_BLUR, Tr(T_BLUR), chev(blurs[c->blur <= 2 ? c->blur : 0]));
+        UiMenuAdd(m, G_SCREEN, Tr(T_SCREEN_EFFECT), chev(screens[c->screen >= 0 && c->screen <= 5 ? c->screen : 0]));
+        break;
     }
-    UiMenuAdd(m, G_SMOOTH, Tr(T_SMOOTH_SCALING), onoff(c->smooth));
-    UiMenuAdd(m, G_FXAA, Tr(T_FXAA), onoff(c->fxaa));
-    UiMenuAdd(m, G_SHARPEN, Tr(T_SHARPEN), chev(levels[c->sharpen <= 2 ? c->sharpen : 0]));
-    UiMenuAdd(m, G_BLUR, Tr(T_BLUR), chev(blurs[c->blur <= 2 ? c->blur : 0]));
-    UiMenuAdd(m, G_SCREEN, Tr(T_SCREEN_EFFECT), chev(screens[c->screen >= 0 && c->screen <= 5 ? c->screen : 0]));
-    UiMenuAdd(m, G_BACK, Tr(T_BACK), NULL);
+    case PG_INTERFACE:
+    {
+        static const int fpsLabels[4] = { T_OFF, T_FPS_ONLY, T_FPS_CPU, T_FPS_ALL };
+        UiMenuAdd(m, S_LANGUAGE, Tr(T_LANGUAGE), opens(v, sizeof(v), Tr(T_LANG_NAME)));
+        UiMenuAdd(m, S_FPS, Tr(T_SHOW_FPS), chev(fpsLabels[c->showFps & 3]));
+        if (s_fromList)
+        {
+            UiMenuAdd(m, S_ART_DL, Tr(T_ART_DOWNLOADS), onoff(c->artDownload));
+            UiMenuAdd(m, S_ART_ALL, Tr(T_ART_ALL), NULL);
+        }
+        break;
+    }
+    case PG_ACH:
+    {
+        int st = XbRaState();
+        char name[64];
+        UiMenuAdd(m, S_RA_ON, Tr(T_RA_ENABLE), onoff(c->achievements));
+        UiTextFit(UI_REGULAR, 21, 300, st == XB_RA_IN ? XbRaUser() : st == XB_RA_BUSY ? Tr(T_RA_CONNECTING) : st == XB_RA_OUT ? Tr(T_RA_NOT_CONNECTED) : "-",
+                  name, sizeof(name));
+        UiMenuAdd(m, S_RA_ACCOUNT, Tr(T_RA_ACCOUNT), name);
+        break;
+    }
+    case PG_ADVANCED:
+    {
+        static const int bios[3] = { T_BIOS_HLE, T_BIOS_REAL, T_BIOS_AUTO };
+        UiMenuAdd(m, S_CPU, Tr(T_CPU_NEXT), chev(c->useJit ? T_RECOMPILER : T_INTERPRETER));
+        UiMenuAdd(m, S_RENDERER, Tr(T_RENDERER_NEXT), chev(c->gpuRender ? T_GPU : T_SOFTWARE));
+        UiMenuAdd(m, S_BIOS, Tr(T_BIOS_NEXT), chev(bios[c->biosMode >= 0 && c->biosMode <= 2 ? c->biosMode : 0]));
+        UiMenuAdd(m, G_VSYNC, Tr(T_VSYNC), c->vsync == 2 ? chev(T_VSYNC_STRICT) : onoff(c->vsync));
+        UiMenuAdd(m, S_AUDIO, Tr(T_AUDIO_MARGIN), arrows(v, sizeof(v), "%d ms", s_audioSteps[audio_step_of(c->audioMs)]));
+        UiMenuAdd(m, S_VMU, Tr(T_VMU_CARD), chev(c->vmuShared ? T_VMU_SHARED : T_VMU_PER_GAME));
+        break;
+    }
+    }
+    UiMenuAdd(m, S_BACK, Tr(T_BACK), NULL);
     m->sel = sel < m->count ? sel : 0;
 }
 
-enum { C_STICK = PADIN_COUNT, C_DEAD, C_RANGE, C_INVERT, C_RUMBLE, C_RESET, C_BACK, C_COUNT };
+enum { C_STICK = PADIN_COUNT, C_STICK_DPAD, C_DEAD, C_RANGE, C_INVERT, C_RUMBLE, C_RESET, C_BACK, C_COUNT };
 #define CAPTURE_MS 5000
 #define CTL_X 70.0f
 #define CTL_Y 40.0f
@@ -454,7 +546,7 @@ static ControlsState s_ctl;
 
 static const char *ctl_item_name(int item)
 {
-    static const int labels[] = { T_ANALOG_STICK, T_DEAD_ZONE, T_SENSITIVITY, T_INVERT, T_RUMBLE, T_DEFAULT_CONTROLS, T_BACK };
+    static const int labels[] = { T_ANALOG_STICK, T_STICK_DPAD, T_DEAD_ZONE, T_SENSITIVITY, T_INVERT, T_RUMBLE, T_DEFAULT_CONTROLS, T_BACK };
     if (item >= PADIN_UP && item < PADIN_COUNT) return input_name(item);
     if (item < PADIN_COUNT) return Trf(T_DC_BUTTON, input_name(item));
     return Tr(labels[item - C_STICK]);
@@ -462,9 +554,9 @@ static const char *ctl_item_name(int item)
 
 #define CTL_AREA_X (CTL_X + 24 + CTL_LISTW + 40)
 #define CTL_AREA_W (CTL_X + CTL_W - 40 - CTL_AREA_X)
-#define CTL_PAD_S (CTL_AREA_W * 0.44f / 100.0f)
-#define CTL_OPT_ROW 31.0f
-#define CTL_OPT_TOP (CTL_Y + CTL_TOP + 78 * CTL_PAD_S + 44)
+#define CTL_PAD_S (CTL_AREA_W * 0.40f / 100.0f)
+#define CTL_OPT_ROW 29.0f
+#define CTL_OPT_TOP (CTL_Y + CTL_TOP + 78 * CTL_PAD_S + 36)
 
 static void ctl_place(int item, float *x, float *y, float *w)
 {
@@ -533,7 +625,7 @@ static int controls_capture(void)
 static void ctl_hints(u32 mask, char *out, size_t size)
 {
     static const char *const glyph[PADSRC_COUNT] = { "", "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "START", "LS", "RS",
-                                                     "DPAD", "DPAD", "DPAD", "DPAD" };
+                                                     "DPAD", "DPAD", "DPAD", "DPAD", "LS", "LS", "LS", "LS", "RS", "RS", "RS", "RS" };
     int pass, i;
     out[0] = 0;
     for (pass = 0; pass < 2; pass++)
@@ -541,9 +633,9 @@ static void ctl_hints(u32 mask, char *out, size_t size)
         {
             char item[64];
             size_t len = strlen(out);
-            int click = i == PADSRC_LS || i == PADSRC_RS || (i >= PADSRC_DUP && i <= PADSRC_DRIGHT);
+            int click = i == PADSRC_LS || i == PADSRC_RS || (i >= PADSRC_DUP && i <= PADSRC_RSRIGHT);
             if (!(mask & (1u << i)) || click != pass) continue;
-            if (click) _snprintf(item, sizeof(item) - 1, "%s:%s", glyph[i], Tr(i >= PADSRC_DUP ? T_DIR_UP + (i - PADSRC_DUP) : T_CLICK));
+            if (click) _snprintf(item, sizeof(item) - 1, "%s:%s", glyph[i], Tr(i >= PADSRC_DUP ? T_DIR_UP + ((i - PADSRC_DUP) & 3) : T_CLICK));
             else strcpy(item, glyph[i]);
             item[sizeof(item) - 1] = 0;
             if (len + strlen(item) + 2 > size) return;
@@ -559,7 +651,7 @@ static int dc_shape(int item, float *x, float *y, float *w, float *h, float *r)
     static const float circles[][4] = {
         { PADIN_A, 78.0f, 33.0f, 3.7f }, { PADIN_B, 85.0f, 26.0f, 3.7f }, { PADIN_X, 71.0f, 26.0f, 3.7f },
         { PADIN_Y, 78.0f, 19.0f, 3.7f }, { PADIN_START, 50.0f, 45.0f, 2.8f }, { C_STICK, 24.0f, 21.0f, 7.5f },
-        { C_DEAD, 24.0f, 21.0f, 7.5f }, { C_RANGE, 24.0f, 21.0f, 7.5f }, { C_INVERT, 24.0f, 21.0f, 7.5f },
+        { C_STICK_DPAD, 24.0f, 21.0f, 7.5f }, { C_DEAD, 24.0f, 21.0f, 7.5f }, { C_RANGE, 24.0f, 21.0f, 7.5f }, { C_INVERT, 24.0f, 21.0f, 7.5f },
     };
     static const float boxes[][6] = {
         { PADIN_L, 12.0f, -6.0f, 24.0f, 11.0f, 3.0f }, { PADIN_R, 64.0f, -6.0f, 24.0f, 11.0f, 3.0f },
@@ -679,7 +771,8 @@ static void controls_draw(int sel)
         float bx, by, bw;
         int right = sel >= PADIN_COUNT;
         ctl_place(sel, &bx, &by, &bw);
-        selection_bar(anim_step(&selX, bx, right != lastRight), anim_step(&selY, by, right != lastRight) + 2, bw, CTL_ROW - 4);
+        float bh = right ? CTL_OPT_ROW : CTL_ROW;
+        selection_bar(anim_step(&selX, bx, right != lastRight), anim_step(&selY, by, right != lastRight) + 2, bw, bh - 4);
         lastRight = right;
     }
     for (i = 0; i < C_COUNT; i++)
@@ -687,7 +780,7 @@ static void controls_draw(int sel)
         int s = i == sel;
         float rx, ry, rw, cy, right;
         ctl_place(i, &rx, &ry, &rw);
-        cy = ry + CTL_ROW * 0.5f;
+        cy = ry + (i < PADIN_COUNT ? CTL_ROW : CTL_OPT_ROW) * 0.5f;
         right = rx + rw - 18;
         UiText(s ? UI_BOLD : UI_REGULAR, 20, rx + 24, cy, s ? UI_COL_TEXT : UI_COL_TEXT2, ctl_item_name(i), UI_LEFT);
         if (i < PADIN_COUNT)
@@ -712,7 +805,15 @@ static void controls_draw(int sel)
             }
         }
         else if (i == C_STICK)
-            draw_value(right, cy, chev(s_ctl.c->padStick[s_ctl.player] ? T_STICK_RIGHT : T_STICK_LEFT), s);
+        {
+            int st = s_ctl.c->padStick[s_ctl.player];
+            draw_value(right, cy, chev(st == PAD_STICK_RIGHT ? T_STICK_RIGHT : st == PAD_STICK_NONE ? T_SRC_NONE : T_STICK_LEFT), s);
+        }
+        else if (i == C_STICK_DPAD)
+        {
+            int st = config_pad_stick_dpad(map);
+            draw_value(right, cy, chev(st == PAD_STICK_LEFT ? T_STICK_LEFT : st == PAD_STICK_RIGHT ? T_STICK_RIGHT : st == -2 ? T_CUSTOM : T_OFF), s);
+        }
         else if (i == C_RUMBLE)
             draw_value(right, cy, onoff(s_ctl.c->rumble), s);
         else if (i == C_DEAD || i == C_RANGE)
@@ -800,7 +901,17 @@ static int controls_page(IDirect3DDevice9 *dev, Config *c, UiBackgroundFn backgr
             }
             else if (sel == C_STICK && (dir || (down & XINPUT_GAMEPAD_A)))
             {
-                c->padStick[s_ctl.player] = !c->padStick[s_ctl.player];
+                int *st = &c->padStick[s_ctl.player];
+                *st = (*st >= PAD_STICK_LEFT && *st <= PAD_STICK_NONE ? *st : PAD_STICK_LEFT) + (dir ? dir : 1);
+                *st = (*st + 3) % 3;
+                changed = 1;
+            }
+            else if (sel == C_STICK_DPAD && (dir || (down & XINPUT_GAMEPAD_A)))
+            {
+                int st = config_pad_stick_dpad(map), k = st == PAD_STICK_LEFT ? 1 : st == PAD_STICK_RIGHT ? 2 : 0;
+                k = (k + (dir ? dir : 1) + 3) % 3;
+                if (st == -2 && (dir ? dir : 1) < 0) k = 2;
+                config_pad_set_stick_dpad(map, k == 1 ? PAD_STICK_LEFT : k == 2 ? PAD_STICK_RIGHT : -1);
                 changed = 1;
             }
             else if ((sel == C_DEAD || sel == C_RANGE || sel == C_INVERT) && (dir || (down & XINPUT_GAMEPAD_A)))
@@ -846,8 +957,11 @@ static int settings_change(Config *c, int id, int dir)
         c->gpuRender = !c->gpuRender;
         if (!c->gpuRender && c->widescreen) format_set(c, 2);
         return 1;
+    case S_BIOS: c->biosMode = cycle(c->biosMode >= 0 && c->biosMode <= 2 ? c->biosMode : 0, 3, dir); return 1;
+    case S_AUDIO: c->audioMs = s_audioSteps[clampi(audio_step_of(c->audioMs) + dir, 0, AUDIO_STEPS - 1)]; return 1;
     case S_FPS: c->showFps = cycle(c->showFps, 4, dir); return 1;
     case S_ART_DL: c->artDownload = !c->artDownload; return 1;
+    case S_VMU: c->vmuShared = !c->vmuShared; return 1;
     case G_PRESET:
     {
         int p = xb_display_preset_of(c);
@@ -869,6 +983,7 @@ static int settings_change(Config *c, int id, int dir)
     }
     case G_VSYNC: c->vsync = cycle(c->vsync, 3, dir); return 1;
     case G_TEXFILTER: c->texFilter = cycle(c->texFilter, 3, dir); return 1;
+    case G_RES: c->renderScale = !c->renderScale; return 1;
     case G_ZOOM: c->zoom = clampi(c->zoom + dir * 2, 80, 110); return 1;
     case G_POSX: c->posX = clampi(c->posX + dir * 4, -96, 96); return 1;
     case G_POSY: c->posY = clampi(c->posY + dir * 4, -64, 64); return 1;
@@ -887,35 +1002,44 @@ int SettingsScreen(IDirect3DDevice9 *dev, Config *c, const char *gameFolder, UiB
     UiMenu m;
     UiInput in;
     char all[CONFIG_PATH_MAX], game[CONFIG_PATH_MAX], note[192];
-    int changed = 0, perGame = gameFolder && gameFolder[0], page = 0, mainSel = 0;
+    int changed = 0, perGame = gameFolder && gameFolder[0], page = PG_MAIN, mainSel = 0;
     DWORD noteAt = 0;
     note[0] = 0;
     SettingsPaths(gameFolder, all, game, sizeof(all));
-    settings_build(&m, c, perGame, 0);
+    settings_page(&m, c, PG_MAIN, perGame, 0);
     UiInputInit(&in);
     for (;;)
     {
         WORD down = UiInputPoll(&in);
         int id = UiMenuSelected(&m);
         UiMenuNavigate(&m, down);
-        if (page && ((down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) || ((down & XINPUT_GAMEPAD_A) && id == G_BACK)))
+        if (page != PG_MAIN && ((down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) || ((down & XINPUT_GAMEPAD_A) && id == S_BACK)))
         {
-            page = 0;
-            settings_build(&m, c, perGame, mainSel);
+            page = PG_MAIN;
+            settings_page(&m, c, page, perGame, mainSel);
             continue;
         }
         if (down & (XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)) break;
-        if ((down & XINPUT_GAMEPAD_A) && id == S_GRAPHICS)
+        if (XbRaBusy())
         {
-            page = 1;
+            if (page == PG_ACH) settings_page(&m, c, page, perGame, m.sel);
+            begin_frame(dev, background, user);
+            UiMenuDraw(&m);
+            end_frame(dev);
+            continue;
+        }
+        if (page == PG_ACH && !down) settings_page(&m, c, page, perGame, m.sel);
+        if ((down & XINPUT_GAMEPAD_A) && (id == S_PICTURE || id == S_EFFECTS || id == S_INTERFACE || id == S_ACH || id == S_ADVANCED))
+        {
+            page = id == S_PICTURE ? PG_PICTURE : id == S_EFFECTS ? PG_EFFECTS : id == S_INTERFACE ? PG_INTERFACE : id == S_ACH ? PG_ACH : PG_ADVANCED;
             mainSel = m.sel;
-            graphics_build(&m, c, 0);
+            settings_page(&m, c, page, perGame, 0);
             continue;
         }
         if ((down & XINPUT_GAMEPAD_A) && id == S_CONTROLS)
         {
             if (controls_page(dev, c, background, user)) changed = 1;
-            settings_build(&m, c, perGame, m.sel);
+            settings_page(&m, c, page, perGame, m.sel);
             UiInputInit(&in);
             continue;
         }
@@ -928,9 +1052,26 @@ int SettingsScreen(IDirect3DDevice9 *dev, Config *c, const char *gameFolder, UiB
                 strncpy(c->lang, LangCode(lang), sizeof(c->lang) - 1);
                 c->lang[sizeof(c->lang) - 1] = 0;
                 SettingsSaveLang(all, c->lang);
+                XbAchUnlock(XB_ACH_LANGUAGE);
             }
-            settings_build(&m, c, perGame, m.sel);
+            settings_page(&m, c, page, perGame, m.sel);
             UiInputInit(&in);
+            continue;
+        }
+        if ((down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) && id == S_RA_ON)
+        {
+            char value[4];
+            c->achievements = !c->achievements;
+            sprintf(value, "%d", c->achievements);
+            SettingsSaveKey(all, "achievements", value);
+            XbRaSetEnabled(c->achievements);
+            settings_page(&m, c, page, perGame, m.sel);
+            continue;
+        }
+        if ((down & XINPUT_GAMEPAD_A) && id == S_RA_ACCOUNT)
+        {
+            if (c->achievements) XbRaAccount();
+            settings_page(&m, c, page, perGame, m.sel);
             continue;
         }
         if ((down & XINPUT_GAMEPAD_A) && id == S_ART_ALL)
@@ -950,8 +1091,7 @@ int SettingsScreen(IDirect3DDevice9 *dev, Config *c, const char *gameFolder, UiB
                 note[sizeof(note) - 1] = 0;
                 noteAt = GetTickCount();
             }
-            if (page == 1) graphics_build(&m, c, m.sel);
-            else settings_build(&m, c, perGame, m.sel);
+            settings_page(&m, c, page, perGame, m.sel);
         }
         begin_frame(dev, background, user);
         UiMenuDraw(&m);
@@ -1448,6 +1588,7 @@ static int fav_toggle(int sel)
     path[sizeof(path) - 1] = 0;
     s_games[sel].fav = !s_games[sel].fav;
     fav_save();
+    if (s_games[sel].fav) XbAchUnlock(XB_ACH_FAVOURITE);
     qsort(s_games, s_gameCount, sizeof(GameEntry), game_less);
     for (i = 0; i < s_gameCount; i++)
         if (!_stricmp(s_games[i].path, path)) return i;
@@ -1487,6 +1628,34 @@ static int letter_jump(int sel, int dir)
     return i;
 }
 
+static RedumpIndex *s_redump;
+static int s_redumpBad;
+
+int XbGameIdentity(const char *path, DiscInfo *info)
+{
+    char name[129];
+    if (!info->product[0]) return 0;
+    if (!s_redump && !s_redumpBad)
+    {
+        char dat[96];
+        FILE *f;
+        xb_fs_data_path(dat, sizeof(dat), "art", "dreamcast.dat");
+        s_redump = redump_index_load(dat);
+        if (!s_redump && (f = fopen(dat, "rb")) != NULL)
+        {
+            fclose(f);
+            s_redumpBad = 1;
+        }
+    }
+    if (!redump_ip_borrowed(s_redump, info->product, info->title)) return 0;
+    game_display_name(base_of(path), name, sizeof(name));
+    LOG_INFO("[menu] %s: the header of another game (%s, %s): known as \"%s\"", base_of(path), info->title, info->product, name);
+    strncpy(info->title, name, sizeof(info->title) - 1);
+    info->title[sizeof(info->title) - 1] = 0;
+    info->product[0] = 0;
+    return 1;
+}
+
 static char s_jumpLetter;
 static float s_jumpAt;
 
@@ -1507,6 +1676,7 @@ static void scan_games(const Config *c)
             g->infoOk = read_info(g);
             read++;
         }
+        if (g->infoOk && XbGameIdentity(g->path, &g->info)) read++;
         if (g->infoOk) strncpy(g->shown, g->info.title, sizeof(g->shown) - 1);
         else
             game_display_name(base_of(g->path), g->shown, sizeof(g->shown));
@@ -1973,6 +2143,7 @@ int GameList(IDirect3DDevice9 *dev, Config *c, char *path, int pathSize)
             AboutScreen(dev, NULL, NULL);
             UiInputInit(&in);
         }
+        UiServicePump(dev);
         dev->Clear(0, NULL, D3DCLEAR_TARGET, UI_COL_BG_BOTTOM, 1.0f, 0);
         views_take(dev);
         ArtGetStatus(&st);
@@ -1984,6 +2155,7 @@ int GameList(IDirect3DDevice9 *dev, Config *c, char *path, int pathSize)
             if (age < MSG_MS) UiToast(msg, (float)age, (float)MSG_MS);
             else msg[0] = 0;
         }
+        else UiNotifyDraw();
         UiEnd();
         dev->Present(NULL, NULL, NULL, NULL);
     }

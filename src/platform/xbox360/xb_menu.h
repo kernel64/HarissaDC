@@ -18,6 +18,7 @@ struct UiMenu
     int id[UI_MENU_MAX];
     int count, sel;
     char footer[192];
+    IDirect3DTexture9 *(*icon)(int row);
 };
 
 void UiMenuClear(UiMenu *m, const char *title, const char *footer);
@@ -25,6 +26,10 @@ int UiMenuAdd(UiMenu *m, int id, const char *label, const char *value);
 void UiMenuDraw(const UiMenu *m);
 void UiMenuNavigate(UiMenu *m, WORD down);
 int UiMenuSelected(const UiMenu *m);
+
+void UiNotify(const char *text, int ms, const char *badge);
+int UiNotifyDraw(void);
+void UiServicePump(IDirect3DDevice9 *dev);
 
 void SettingsPaths(const char *gameFolder, char *all, char *game, int size);
 void SettingsLoad(Config *c, const char *path);
@@ -35,6 +40,7 @@ typedef void (*UiBackgroundFn)(void *user);
 int SettingsScreen(IDirect3DDevice9 *dev, Config *c, const char *gameFolder, UiBackgroundFn background, void *user);
 
 int SettingsSaveLang(const char *path, const char *code);
+int SettingsSaveKey(const char *path, const char *key, const char *value);
 void SettingsApplyLanguage(const Config *c);
 
 int LanguageScreen(IDirect3DDevice9 *dev, int initial, int firstStart);
@@ -47,6 +53,9 @@ const char *xb_cache_dir(void);
 #define XB_CACHE_DIR xb_cache_dir()
 int ArchivePrepare(IDirect3DDevice9 *dev, const char *path, char *image, int imageSize, char *error, int errorSize,
                    UiBackgroundFn background, void *user);
+
+struct DiscInfo;
+int XbGameIdentity(const char *path, DiscInfo *info);
 
 int GameList(IDirect3DDevice9 *dev, Config *c, char *path, int pathSize);
 
