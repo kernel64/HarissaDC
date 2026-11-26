@@ -31,8 +31,32 @@
 
 static const char s_dbHost[] = "raw.githubusercontent.com";
 static const char s_dbPath[] = "/libretro/libretro-database/master/metadat/redump/Sega%20-%20Dreamcast.dat";
-static const char s_artHost[] = "thumbnails.libretro.com";
-static const char s_artPath[] = "/Sega%20-%20Dreamcast/Named_Boxarts/";
+
+struct ArtSource
+{
+    const char *host;
+    const char *path;
+    const char *canary;
+    int state;
+    DWORD since;
+};
+static ArtSource s_src[] = {
+    { "thumbnails.libretro.com", "/Sega%20-%20Dreamcast/Named_Boxarts/", "Crazy Taxi (USA)", 0, 0 },
+    { "raw.githubusercontent.com", "/libretro-thumbnails/Sega_-_Dreamcast/master/Named_Boxarts/", "Crazy Taxi (USA)", 0, 0 },
+};
+static ArtSource s_srcAw[] = {
+    { "thumbnails.libretro.com", "/Atomiswave/Named_Boxarts/", "Metal Slug 6", 0, 0 },
+    { "raw.githubusercontent.com", "/libretro-thumbnails/Atomiswave/master/Named_Boxarts/", "Metal Slug 6", 0, 0 },
+};
+#define ART_SRC_RETRY_MS (10u * 60u * 1000u)
+
+struct ThumbIndex
+{
+    const char *repo;
+    std::vector<std::string> names;
+    int tried;
+};
+static ThumbIndex s_thumbsDc = { "Sega_-_Dreamcast" }, s_thumbsAw = { "Atomiswave" };
 
 struct DbEntry
 {
@@ -158,6 +182,8 @@ struct ArtInfo
     int have;
     int found;
     int cover;
+    int checked;
+    int v;
 };
 
 static void info_load(const std::string &key, ArtInfo *info)
@@ -173,6 +199,8 @@ static void info_load(const std::string &key, ArtInfo *info)
     info->have = 1;
     if ((p = strstr((const char *)data, "found=")) != NULL) info->found = atoi(p + 6);
     if ((p = strstr((const char *)data, "cover=")) != NULL) info->cover = atoi(p + 6);
+    if ((p = strstr((const char *)data, "checked=")) != NULL) info->checked = atoi(p + 8);
+    if ((p = strstr((const char *)data, "v=")) != NULL) info->v = atoi(p + 2);
     free(data);
 }
 
@@ -181,7 +209,7 @@ static void info_save(const std::string &key, const ArtInfo *info, const char *n
     char path[160], text[400];
     int n;
     cover_file(key, "txt", path, sizeof(path));
-    n = _snprintf(text, sizeof(text) - 1, "found=%d\r\ncover=%d\r\nname=%s\r\n", info->found, info->cover, name ? name : "");
+    n = _snprintf(text, sizeof(text) - 1, "found=%d\r\ncover=%d\r\nchecked=1\r\nv=2\r\nname=%s\r\n", info->found, info->cover, name ? name : "");
     if (n < 0) n = (int)sizeof(text) - 1;
     text[sizeof(text) - 1] = 0;
     if (!file_write(path, text, (u32)n)) LOG_WARN("[art] cannot write %s", path);
@@ -303,7 +331,14 @@ static int db_find(const ArtGame *g, const DbEntry **out, int max)
     std::vector<Candidate> found;
     char want;
     int n;
-    if (pl >= 2 && !strcmp(g->product + pl - 2, "50")) want = 'E';
+    if (!g->product[0])
+    {
+        std::string f = g->file;
+        size_t paren = f.find(" ("), dot = f.rfind('.');
+        title = alnum_upper(f.c_str(), paren != std::string::npos ? paren : dot != std::string::npos ? dot : f.size());
+        want = strstr(g->file, "(USA") ? 'U' : strstr(g->file, "(Europe") ? 'E' : strstr(g->file, "(Japan") ? 'J' : 'U';
+    }
+    else if (pl >= 2 && !strcmp(g->product + pl - 2, "50")) want = 'E';
     else if (!strcmp(g->areas, "J")) want = 'J';
     else if (strchr(g->areas, 'U')) want = 'U';
     else if (strchr(g->areas, 'E')) want = 'E';
@@ -331,10 +366,10 @@ static int db_find(const ArtGame *g, const DbEntry **out, int max)
     return n;
 }
 
-static std::string thumb_path(const std::string &name)
+static std::string thumb_path(const char *dir, const std::string &name)
 {
     static const char hex[] = "0123456789ABCDEF";
-    std::string out = s_artPath;
+    std::string out = dir;
     size_t i;
     for (i = 0; i < name.size(); i++)
     {
@@ -359,15 +394,40 @@ static std::string first_group(const std::string &name)
     return b == std::string::npos ? name : name.substr(0, b + 1);
 }
 
-static int fetch_cover(const std::vector<std::string> &names, const char *dest)
+static void source_leave(ArtSource *s, const char *why, int status)
+{
+    s->state = -1;
+    s->since = GetTickCount();
+    LOG_INFO("[art] %s: %s (status %d), not asked for %u min", s->host, why, status, ART_SRC_RETRY_MS / 60000u);
+}
+
+static int source_usable(ArtSource *s)
+{
+    if (s->state == -1 && GetTickCount() - s->since >= ART_SRC_RETRY_MS) s->state = 0;
+    return s->state != -1;
+}
+
+static int source_check(ArtSource *s)
+{
+    u32 len = 0;
+    int st = NetGet(s->host, thumb_path(s->path, s->canary).c_str(), 1, NULL, &len, ART_MAX_PNG, NULL, 0);
+    if (st == 200)
+    {
+        s->state = 1;
+        return 1;
+    }
+    source_leave(s, st ? "no picture for a game that has one" : "no answer", st);
+    return 0;
+}
+
+static int fetch_from(const ArtSource *s, const std::vector<std::string> &names, const char *dest)
 {
     size_t i;
-    int netFail = 0;
     for (i = 0; i < names.size(); i++)
     {
         u8 *png = NULL;
         u32 len = 0;
-        int st = NetGet(s_artHost, thumb_path(names[i]).c_str(), 1, &png, &len, ART_MAX_PNG, NULL, 0);
+        int st = NetGet(s->host, thumb_path(s->path, names[i]).c_str(), 1, &png, &len, ART_MAX_PNG, NULL, 0);
         if (st == 200 && png)
         {
             int w = 0, h = 0;
@@ -387,13 +447,128 @@ static int fetch_cover(const std::vector<std::string> &names, const char *dest)
         }
         else if (!st)
         {
-            netFail = 1;
             free(png);
-            break;
+            return -1;
         }
         free(png);
     }
-    return netFail ? -1 : 0;
+    return 0;
+}
+
+static int fetch_cover(ArtSource *src, size_t nsrc, const std::vector<std::string> &names, const char *dest)
+{
+    size_t i;
+    for (i = 0; i < nsrc; i++)
+    {
+        ArtSource *s = &src[i];
+        int r;
+        if (!source_usable(s)) continue;
+        r = fetch_from(s, names, dest);
+        if (r > 0) return 1;
+        if (r < 0)
+            source_leave(s, "no answer", 0);
+        else if (s->state == 1 || source_check(s))
+            return 0;
+    }
+    return -1;
+}
+
+static int thumbs_ready(ThumbIndex *ix)
+{
+    char path[96], api[160];
+    u8 *data = NULL;
+    u32 len = 0;
+    const char *p;
+    if (!ix->names.empty()) return 1;
+    _snprintf(path, sizeof(path) - 1, "%s\\thumbs_%s.txt", s_dir, ix->repo);
+    path[sizeof(path) - 1] = 0;
+    if (file_age_days(path) < ART_DB_MAX_AGE_DAYS && file_read(path, &data, &len, ART_MAX_DB))
+    {
+        for (p = (const char *)data; *p;)
+        {
+            const char *e = p + strcspn(p, "\r\n");
+            if (e > p) ix->names.push_back(std::string(p, e - p));
+            p = e + strspn(e, "\r\n");
+        }
+        free(data);
+        return !ix->names.empty();
+    }
+    if (ix->tried || !s_netAllowed) return 0;
+    ix->tried = 1;
+    _snprintf(api, sizeof(api) - 1, "/repos/libretro-thumbnails/%s/git/trees/master?recursive=1", ix->repo);
+    api[sizeof(api) - 1] = 0;
+    {
+        int st = NetGet("api.github.com", api, 1, &data, &len, ART_MAX_DB, NULL, 0);
+        std::string list;
+        if (st != 200 || !data)
+        {
+            LOG_INFO("[art] cannot list the %s pictures (status %d)", ix->repo, st);
+            free(data);
+            return 0;
+        }
+        for (p = strstr((const char *)data, "\"path\":"); p; p = strstr(p, "\"path\":"))
+        {
+            std::string name;
+            p += 7;
+            while (*p == ' ') p++;
+            if (strncmp(p, "\"Named_Boxarts/", 15)) continue;
+            p += 15;
+            while (*p && *p != '"')
+            {
+                if (*p == '\\' && p[1]) p++;
+                name += *p++;
+            }
+            if (name.size() > 4 && !name.compare(name.size() - 4, 4, ".png"))
+            {
+                name.resize(name.size() - 4);
+                ix->names.push_back(name);
+                list += name;
+                list += "\r\n";
+            }
+        }
+        free(data);
+        if (ix->names.empty()) return 0;
+        file_write(path, list.data(), (u32)list.size());
+        LOG_INFO("[art] %u %s pictures listed", (u32)ix->names.size(), ix->repo);
+    }
+    return 1;
+}
+
+static std::string name_title(const std::string &n)
+{
+    size_t paren = n.find(" (");
+    return alnum_upper(n.c_str(), paren == std::string::npos ? n.size() : paren);
+}
+
+static void near_names(const std::string &redump, std::vector<std::string> &names)
+{
+    std::string title = name_title(redump), first = first_group(redump);
+    size_t i, a = first.find(" (");
+    std::string region = a == std::string::npos ? "" : first.substr(a);
+    for (i = 0; i < s_thumbsDc.names.size() && (int)names.size() < ART_NAMES + 4; i++)
+    {
+        const std::string &n = s_thumbsDc.names[i];
+        std::string f = first_group(n);
+        if (name_title(n) != title || f.size() < region.size() || f.compare(f.size() - region.size(), region.size(), region)) continue;
+        if (name_penalty(n)) continue;
+        if (std::find(names.begin(), names.end(), n) == names.end()) names.push_back(n);
+    }
+}
+
+static void atomiswave_names(const ArtGame *g, std::vector<std::string> &names)
+{
+    std::string title = alnum_upper(g->title, strlen(g->title)), file = g->file;
+    size_t i, dot = file.rfind('.');
+    if (dot != std::string::npos) file.resize(dot);
+    file = name_title(file);
+    for (i = 0; i < s_thumbsAw.names.size(); i++)
+    {
+        const std::string &n = s_thumbsAw.names[i];
+        std::string t = name_title(n);
+        if (t.size() < 4 || (t != title && t != file)) continue;
+        if (n.find(" (") == std::string::npos) names.insert(names.begin(), n);
+        else names.push_back(n);
+    }
 }
 
 static void set_busy(const char *path)
@@ -415,7 +590,7 @@ static int download_missing(const ArtGame *g, int bulk)
     cover_file(key, "png", png, sizeof(png));
     if (file_exists(png)) return 0;
     info_load(key, &info);
-    if (info.have && !bulk && (!info.found || info.cover == 0)) return 0;
+    if (info.have && !bulk && info.v >= 2 && (!info.found || (info.cover == 0 && info.checked))) return 0;
     if (!NetStart(0))
     {
         EnterCriticalSection(&s_lock);
@@ -432,12 +607,19 @@ static int download_missing(const ArtGame *g, int bulk)
     nc = db_find(g, cands, ART_NAMES);
     if (!nc)
     {
-        LOG_INFO("[art] %s (%s): not in the Redump list", g->title, g->product);
-        info.found = 0;
-        info.cover = 0;
-        info_save(key, &info, NULL);
+        if (thumbs_ready(&s_thumbsAw)) atomiswave_names(g, names);
+        r = names.empty() ? 0 : fetch_cover(s_srcAw, sizeof(s_srcAw) / sizeof(s_srcAw[0]), names, png);
+        if (r < 0)
+        {
+            set_busy("");
+            return -1;
+        }
+        if (!r) LOG_INFO("[art] %s (%s): not in the Redump list", g->title, g->product);
+        info.found = r;
+        info.cover = r;
+        info_save(key, &info, r ? names[0].c_str() : NULL);
         set_busy("");
-        return 0;
+        return r;
     }
     for (i = 0; i < nc && (int)names.size() < ART_NAMES; i++)
     {
@@ -445,7 +627,19 @@ static int download_missing(const ArtGame *g, int bulk)
         if (std::find(names.begin(), names.end(), a) == names.end()) names.push_back(a);
         if (b != a && (int)names.size() < ART_NAMES && std::find(names.begin(), names.end(), b) == names.end()) names.push_back(b);
     }
-    r = fetch_cover(names, png);
+    r = fetch_cover(s_src, sizeof(s_src) / sizeof(s_src[0]), names, png);
+    if (r == 0 && thumbs_ready(&s_thumbsDc))
+    {
+        std::vector<std::string> others;
+        near_names(cands[0]->name, others);
+        for (i = 0; i < (int)others.size(); i++)
+            if (std::find(names.begin(), names.end(), others[i]) != names.end()) others.erase(others.begin() + i--);
+        if (!others.empty())
+        {
+            LOG_INFO("[art] %s: trying %s", cands[0]->name.c_str(), others[0].c_str());
+            r = fetch_cover(s_src, sizeof(s_src) / sizeof(s_src[0]), others, png);
+        }
+    }
     if (r < 0)
     {
         EnterCriticalSection(&s_lock);
@@ -597,6 +791,7 @@ static int step_bulk(void)
         EnterCriticalSection(&s_lock);
         s_status.offline = 0;
         LeaveCriticalSection(&s_lock);
+        for (size_t s = 0; s < sizeof(s_src) / sizeof(s_src[0]); s++) s_src[s].state = 0;
         db_ready(1);
     }
     if (download_missing(&g, 1) > 0)

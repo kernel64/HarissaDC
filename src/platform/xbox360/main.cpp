@@ -25,11 +25,28 @@
 #include "xb_ra.h"
 #include "xb_ui.h"
 
+static void use_data_dir(Config *c)
+{
+    static int reported;
+    if (c->mountDrives) xb_fs_mount_drives();
+    if (xb_fs_set_data_root(c->dataDir) != 0)
+    {
+        if (!reported) LOG_ERROR("[main] datadir %s: not a folder (or longer than %d characters), game:\\ kept", c->dataDir, XB_FS_ROOT_MAX);
+        reported = 1;
+        return;
+    }
+    if (!strcmp(c->biosDir, "game:\\bios")) xb_fs_data_dir(c->biosDir, sizeof(c->biosDir), "bios");
+    if (!strcmp(c->gamesDir, "game:\\games")) xb_fs_data_dir(c->gamesDir, sizeof(c->gamesDir), "games");
+    if (!reported) LOG_INFO("[main] datadir %s", c->dataDir);
+    reported = 1;
+}
+
 static void load_settings(Config *c)
 {
     char all[CONFIG_PATH_MAX];
     config_defaults(c);
     SettingsLoad(c, "game:\\" EMU_SHORTNAME ".ini");
+    if (c->dataDir[0]) use_data_dir(c);
     SettingsPaths(NULL, all, NULL, sizeof(all));
     SettingsLoad(c, all);
     if (c->logLevel >= LOG_LEVEL_ERROR && c->logLevel <= LOG_LEVEL_DEBUG) log_set_level(c->logLevel);
@@ -118,7 +135,7 @@ int __cdecl main()
     if (!quit && cfg.autoBoot)
     {
         int r = xb_emu_run(dev, &cfg, cfg.disc);
-        quit = r == XB_EMU_QUIT || cfg.exitAfter > 0;
+        quit = r == XB_EMU_QUIT || cfg.exitAfter > 0 || cfg.exitToDash;
         load_settings(&cfg);
     }
     if (!quit && !cfg.lang[0] && !cfg.uiLang[0])

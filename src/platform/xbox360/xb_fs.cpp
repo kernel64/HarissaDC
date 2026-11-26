@@ -43,7 +43,10 @@ static const DriveMap s_drives[] = {
 
 void xb_fs_mount_drives(void)
 {
+    static int done;
     u32 i;
+    if (done) return;
+    done = 1;
     for (i = 0; i < EMU_ARRAY_COUNT(s_drives); i++)
     {
         char link[32], device[64];
@@ -146,16 +149,36 @@ int xb_fs_exists(const char *path)
     return GetFileAttributesA(path) != 0xFFFFFFFF;
 }
 
-static const char *s_dataDrive = "game";
+static char s_dataRoot[XB_FS_DIR_MAX] = "game:";
 
 void xb_fs_set_data_drive(const char *drive)
 {
-    if (drive) s_dataDrive = drive;
+    if (!drive) return;
+    _snprintf(s_dataRoot, sizeof(s_dataRoot), "%s:", drive);
+    s_dataRoot[sizeof(s_dataRoot) - 1] = 0;
+}
+
+int xb_fs_set_data_root(const char *dir)
+{
+    char root[XB_FS_DIR_MAX], probe[XB_FS_DIR_MAX];
+    int len;
+    DWORD attr;
+    strncpy(root, dir, sizeof(root) - 1);
+    root[sizeof(root) - 1] = 0;
+    len = (int)strlen(root);
+    while (len > 0 && root[len - 1] == '\\') root[--len] = 0;
+    if (len == 0 || len > XB_FS_ROOT_MAX) return -1;
+    _snprintf(probe, sizeof(probe), root[len - 1] == ':' ? "%s\\" : "%s", root);
+    probe[sizeof(probe) - 1] = 0;
+    attr = GetFileAttributesA(probe);
+    if (attr == 0xFFFFFFFF || !(attr & FILE_ATTRIBUTE_DIRECTORY)) return -1;
+    strcpy(s_dataRoot, root);
+    return 0;
 }
 
 const char *xb_fs_data_dir(char *out, int outSize, const char *dir)
 {
-    _snprintf(out, outSize, "%s:\\%s", s_dataDrive, dir);
+    _snprintf(out, outSize, "%s\\%s", s_dataRoot, dir);
     out[outSize - 1] = 0;
     CreateDirectoryA(out, NULL);
     return out;
@@ -163,7 +186,7 @@ const char *xb_fs_data_dir(char *out, int outSize, const char *dir)
 
 const char *xb_fs_data_path(char *out, int outSize, const char *dir, const char *name)
 {
-    char d[64];
+    char d[XB_FS_DIR_MAX];
     xb_fs_join(out, outSize, xb_fs_data_dir(d, sizeof(d), dir), name);
     return out;
 }

@@ -67,6 +67,33 @@ void ta_region_rect(const u32 *regs, int *x0, int *y0, int *x1, int *y1)
     }
 }
 
+u32 ta_region_pass_word(const u32 *regs, u32 pass)
+{
+    u32 base = reg_of(regs, 0x005F802C) & 0x007FFFFCu;
+    int type1 = !((reg_of(regs, 0x005F807C) >> 21) & 1), i, empty = 1;
+    u32 size = type1 ? 20u : 24u, addr = base;
+    for (i = type1 ? 4 : 5; i > 0; i--)
+        if (!(vram32_read32(base + (u32)i * 4) & 0x80000000u))
+        {
+            empty = 0;
+            break;
+        }
+    if (empty) addr += size;
+    if (vram32_read32(addr) & 0x20000000u) size = 24;
+    return vram32_read32(addr + pass * size);
+}
+
+int ta_region_pass_sorted(const u32 *regs, u32 pass)
+{
+    if ((reg_of(regs, 0x005F807C) >> 21) & 1) return !((ta_region_pass_word(regs, pass) >> 29) & 1);
+    return !(reg_of(regs, 0x005F8098) & 1);
+}
+
+u32 ta_scene_passes(const TaScene *s)
+{
+    return s->passes ? s->passes : 1;
+}
+
 static f32 fl(u32 bits)
 {
     f32 f;
@@ -101,6 +128,36 @@ static u32 scale_color(u32 face, u32 intensityBits)
     u32 r = (((face >> 16) & 255) * k + 32768) >> 16, g = (((face >> 8) & 255) * k + 32768) >> 16,
         b = ((face & 255) * k + 32768) >> 16;
     return (face & 0xFF000000u) | (r << 16) | (g << 8) | b;
+}
+
+u32 ta_scene_widen_full_screen(TaScene *s, f32 w, f32 h, f32 left, f32 right)
+{
+    u32 i, k, n = 0;
+    for (i = 0; i < s->stripCount; i++)
+    {
+        const TaStrip *st = &s->strips[i];
+        TaVertex *v = s->verts + st->first;
+        f32 x0, x1, y0, y1;
+        if (st->count < 3 || st->count > 6) continue;
+        x0 = x1 = v[0].x;
+        y0 = y1 = v[0].y;
+        for (k = 1; k < st->count; k++)
+        {
+            if (v[k].z != v[0].z) break;
+            if (v[k].x < x0) x0 = v[k].x;
+            if (v[k].x > x1) x1 = v[k].x;
+            if (v[k].y < y0) y0 = v[k].y;
+            if (v[k].y > y1) y1 = v[k].y;
+        }
+        if (k < st->count || x0 > 0.5f || x1 < w - 0.5f || y0 > 0.5f || y1 < h - 0.5f) continue;
+        for (k = 0; k < st->count; k++)
+        {
+            if (v[k].x <= 0.5f) v[k].x = left;
+            else if (v[k].x >= w - 0.5f) v[k].x = right;
+        }
+        n++;
+    }
+    return n;
 }
 
 void ta_scene_orientation(const TaScene *s, f32 xScale, f32 *across, f32 *down, f32 *up)
@@ -212,7 +269,7 @@ static TaModTri *add_mod_tri(TaScene *s)
     return &s->modTris[s->modTriCount++];
 }
 
-static TaModVol *add_mod_vol(TaScene *s, u32 isp, u32 list, u32 last)
+static TaModVol *add_mod_vol(TaScene *s, u32 isp, u32 list, u32 last, u32 pass)
 {
     TaModVol *m;
     if (s->modVolCount == s->modVolCap)
@@ -227,6 +284,8 @@ static TaModVol *add_mod_vol(TaScene *s, u32 isp, u32 list, u32 last)
     m->isp = isp;
     m->list = list;
     m->last = last;
+    m->pass = pass;
+    if (pass + 1 > s->passes) s->passes = pass + 1;
     m->first = s->modTriCount;
     m->count = 0;
     return m;
@@ -320,10 +379,12 @@ static void decode_vertex(TaVertex *v, const u32 *p, const Header *h)
 static void decode_sprite(TaScene *s, const u32 *p, const Header *h)
 {
     TaStrip *st = add_strip(s);
-    f32 ax = fl(p[1]), ay = fl(p[2]), az = fl(p[3]), bx = fl(p[4]), by = fl(p[5]), bz = fl(p[6]);
-    f32 cx = fl(p[7]), cy = fl(p[8]), cz = fl(p[9]), dx = fl(p[10]), dy = fl(p[11]);
+    const f32 *pf = (const f32 *)p;
+    f32 ax = pf[1], ay = pf[2], az = pf[3], bx = pf[4], by = pf[5], bz = pf[6];
+    f32 cx = pf[7], cy = pf[8], cz = pf[9], dx = pf[10], dy = pf[11];
     f32 au = fl(p[13] & 0xFFFF0000u), av = fl(p[13] << 16), bu = fl(p[14] & 0xFFFF0000u), bv = fl(p[14] << 16);
     f32 cu = fl(p[15] & 0xFFFF0000u), cv = fl(p[15] << 16);
+    u32 base = h->spriteBase, offset = h->spriteOffset;
     TaVertex *v;
     if (!st) return;
     st->isp = h->isp;
@@ -333,12 +394,15 @@ static void decode_sprite(TaScene *s, const u32 *p, const Header *h)
     st->list = h->list;
     st->clip = h->clip;
     st->pass = h->pass;
+    if (h->pass + 1 > s->passes) s->passes = h->pass + 1;
     st->first = s->vertCount;
     st->count = 4;
+    while (s->vertCount + 4 > s->vertCap)
+        if (!grow_vertices(s)) return;
+    v = &s->verts[s->vertCount];
+    s->vertCount += 4;
 #define SPRITE_VERTEX(X, Y, Z, U, V) \
-    v = add_vertex(s); \
-    if (!v) return; \
-    v->x = X; v->y = Y; v->z = Z; v->u = U; v->v = V; v->base = h->spriteBase; v->offset = h->spriteOffset;     note_z(s, v->z);
+    v->x = X; v->y = Y; v->z = Z; v->u = U; v->v = V; v->base = base; v->offset = offset; v++;
     f32 dz = az + cz - bz, du = au + cu - bu, dv = av + cv - bv;
     {
         double abx = (double)bx - ax, aby = (double)by - ay, acx = (double)cx - ax, acy = (double)cy - ay;
@@ -356,6 +420,10 @@ static void decode_sprite(TaScene *s, const u32 *p, const Header *h)
     SPRITE_VERTEX(dx, dy, dz, du, dv);
     SPRITE_VERTEX(cx, cy, cz, cu, cv);
 #undef SPRITE_VERTEX
+    note_z(s, az);
+    note_z(s, bz);
+    note_z(s, dz);
+    note_z(s, cz);
 }
 
 static u32 reg_of(const u32 *regs, u32 addr)
@@ -414,6 +482,7 @@ void ta_scene_decode(TaScene *s, const u32 *data, u32 words, const u32 *regs)
     s->zHuge = 0.0f;
     s->modTriCount = 0;
     s->modVolCount = 0;
+    s->passes = 1;
     decode_background(s, regs);
     while (pos + 8 <= words)
     {
@@ -464,14 +533,14 @@ void ta_scene_decode(TaScene *s, const u32 *data, u32 words, const u32 *regs)
             }
             vertexWords = vertex_words(pcw, list, h.sprite);
             strip = NULL;
-            vol = list == TA_LIST_OPAQUE_MOD || list == TA_LIST_TRANS_MOD ? add_mod_vol(s, h.isp, list, (h.pcw >> 6) & 1) : NULL;
+            vol = list == TA_LIST_OPAQUE_MOD || list == TA_LIST_TRANS_MOD ? add_mod_vol(s, h.isp, list, (h.pcw >> 6) & 1, h.pass) : NULL;
             break;
         case PARA_VERTEX:
             if (list == TA_LIST_OPAQUE_MOD || list == TA_LIST_TRANS_MOD)
             {
                 TaModTri *t;
                 u32 k;
-                if (!vol) vol = add_mod_vol(s, h.isp, list, (h.pcw >> 6) & 1);
+                if (!vol) vol = add_mod_vol(s, h.isp, list, (h.pcw >> 6) & 1, h.pass);
                 t = vol ? add_mod_tri(s) : NULL;
                 if (!t) return;
                 for (k = 0; k < 3; k++)
@@ -499,6 +568,7 @@ void ta_scene_decode(TaScene *s, const u32 *data, u32 words, const u32 *regs)
                 strip->list = h.list;
                 strip->clip = h.clip;
                 strip->pass = h.pass;
+                if (h.pass + 1 > s->passes) s->passes = h.pass + 1;
                 strip->first = s->vertCount;
                 strip->count = 0;
             }

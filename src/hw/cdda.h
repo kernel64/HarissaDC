@@ -18,6 +18,7 @@ void cdda_play(u32 start, u32 end, u32 repeat);
 void cdda_pause(void);
 void cdda_resume(void);
 void cdda_stop(void);
+void cdda_seek(u32 fad);
 
 int cdda_playing(void);
 u32 cdda_status(void);
@@ -25,6 +26,10 @@ u32 cdda_fad(void);
 u32 cdda_repeats(void);
 
 int cdda_frame(s32 *left, s32 *right);
+
+extern int g_cdda_realtime;
+
+u32 cdda_rt_read(s16 *out, u32 frames);
 
 struct StateIO;
 void cdda_state(StateIO *io);

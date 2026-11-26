@@ -232,6 +232,8 @@ static void ta_param(const u32 *p)
     if (s_taWords + s_paramWords <= TA_MAX_WORDS)
     {
         u32 *d = s_taData + s_taWords, k;
+        for (k = 0; k < s_paramWords; k += 8)
+            if (!((size_t)(d + k) & 127) && s_taWords + k + 32 <= TA_MAX_WORDS) EMU_ZERO_LINE(d + k);
         for (k = 0; k + 4 <= s_paramWords; k += 4)
         {
             d[k] = p[k];
@@ -389,6 +391,7 @@ void pvr_ta_dma(u32 dst, u32 src, u32 len)
             u32 avail;
             const u32 *p = (const u32 *)mem_word_ptr(src, &avail);
             if (!p || avail < 32) break;
+            if (!(src & 127) && avail >= 512) EMU_PREFETCH((const u8 *)p + 384);
             pvr_ta_fifo(p, 8);
             src += 32;
             len -= 32;

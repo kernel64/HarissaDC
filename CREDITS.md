@@ -36,6 +36,13 @@ Code from other projects:
   CC BY-SA 4.0), converted to `third_party/libretro-cheats/dreamcast_cheats.txt` by
   `tools/build_cheats.py`. The cheat formats (RetroArch's .cht entries, the Dreamcast code types)
   were studied from RetroArch's cheat manager and Flycast's cheat list (studied, not copied).
+- **16:9 patches**: Flycast's table of widescreen game patches (`core/cheats.cpp`, GPL-2.0-or-later,
+  https://github.com/flyinghead/flycast), codes by Esppiral, S4pph4rad, yzb37859365,
+  Shenmue_Trilogy, Radaron, Virgin KLM, Joel, Zorlon, ELOTROLADO.NET, SEGARETRO.ORG and Sakuragi
+  @ emutalk.net, gathered by flyinghead. Its Dreamcast and NAOMI / Atomiswave entries are
+  converted to `src/hw/widescreen_patches.inc` and `widescreen_patches_arcade.inc` by
+  `tools/build_widescreen.py`; the code applying them (`src/hw/widescreen.cpp`) is HarissaDC's
+  own.
 - **Inter** (interface font, as an atlas) — The Inter Project Authors, SIL Open Font License 1.1
   (`third_party/inter/OFL.txt`).
 - **Noto Sans Arabic** (Arabic glyphs of the atlas) — The Noto Project Authors, SIL Open Font

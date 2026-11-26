@@ -9,6 +9,7 @@
 #include "../../core/config.h"
 
 void xb_display_draw(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex, int srcW, int srcLines, const Config *cfg);
+void xb_display_view(int as43, float u0, float u1);
 void xb_display_rect(float *x, float *y, float *w, float *h);
 
 #define DISPLAY_PRESETS 4

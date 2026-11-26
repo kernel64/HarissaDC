@@ -60,6 +60,8 @@ extern int g_sh4_jit_skips;
 extern int g_sh4_jit_fastmem;
 extern int g_sh4_jit_idle_skip;
 extern int g_sh4_jit_countdown_skip;
+extern u32 g_sh4_jit_countdown_pc;
+extern int g_sh4_jit_wce_msg_poll;
 
 void sh4_jit_ram_written(u32 off);
 

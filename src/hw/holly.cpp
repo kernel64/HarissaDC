@@ -21,6 +21,7 @@ static u32 s_regs[(SB_END - SB_BASE) / 4];
 
 static u32 s_istnrm, s_istext, s_isterr;
 static int s_evCh2, s_evPvrDma, s_evG2Dma, s_evSort = -1;
+static void sort_done(void *, u32);
 
 #define REG(a) s_regs[((a) - SB_BASE) >> 2]
 
@@ -138,7 +139,7 @@ static void sort_dma(void)
     if (guard >= 0x10000) LOG_WARN("[holly] sort DMA: link list without an end");
     LOG_DEBUG("[holly] sort DMA: %u blocks, %u bytes", blocks, bytes);
     REG(SB_SDSTAW) += 32;
-    sched_after(s_evSort, dma_cycles(bytes));
+    sort_done(NULL, 0);
 }
 
 static void sort_done(void *, u32)

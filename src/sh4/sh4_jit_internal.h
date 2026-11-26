@@ -35,11 +35,13 @@ struct Sh4JitGenInfo
     int fpAny;
     int md;
     int libPoll;
+    const void *native;
 };
 
 extern int g_sh4_jit_exit_why;
 
 void sh4_jit_lib_poll(u32 pc);
+void sh4_jit_native_call(u32 pc, const void *loop);
 
 int sh4_jit_mmu_op(u32 op, u32 instPc);
 extern int g_sh4_jit_mmu_abort;

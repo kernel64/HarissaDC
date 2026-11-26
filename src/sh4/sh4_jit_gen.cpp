@@ -60,7 +60,7 @@ enum { RS_NONE = 0, RS_CLEAN = 1, RS_DIRTY = 2 };
 
 enum { COLD_LOAD, COLD_STORE_OTHER, COLD_STORE_CODE, COLD_FLOAD, COLD_FSTORE_OTHER, COLD_FSTORE_CODE, COLD_BAIL, COLD_SIDE,
        COLD_MMU_LOAD, COLD_MMU_STORE, COLD_MMU_FLOAD, COLD_MMU_FSTORE, COLD_MMU_FLOAD2, COLD_MMU_FSTORE2, COLD_MMU_PREF,
-       COLD_MMU_XLOAD2, COLD_MMU_FPUDIS };
+       COLD_MMU_XLOAD2, COLD_MMU_FPUDIS, COLD_MMU_OP };
 #define MMU_MAX_AT 6
 struct ColdStub
 {
@@ -69,11 +69,15 @@ struct ColdStub
     u8 kind, size, reg;
     u8 areg;
     u8 recheck;
+    u8 lut2;
     u32 atMore[MMU_MAX_AT - 1], atCount;
     u8 sreg[16], sfr[16], st;
     u32 instPc;
+    u16 op;
+    u8 jreg[16], jfr[16], jt;
 };
 #define MAX_COLD 160
+static int s_coldLut2;
 #define MAX_SIDE 64
 
 struct SideExit
@@ -619,6 +623,15 @@ static void exit_to(Gen *g, u32 target)
         g->t = t;
         return;
     }
+    if (!linkable && g->info->mmu && g->info->link && g->fp == FP_UNKNOWN && g_sh4_jit_direct_indirect)
+    {
+        ppc_li32(c, 3, target);
+        exit_to_reg(g, 3);
+        memcpy(g->reg, regs, sizeof(regs));
+        memcpy(g->fr, frs, sizeof(frs));
+        g->t = t;
+        return;
+    }
     if (linkable)
     {
         u32 *site;
@@ -652,11 +665,11 @@ static void exit_to_reg(Gen *g, u32 r)
     if (r != 4 && r != 12) probe_exit(g);
     writeback(g);
     ppc_stw(c, r, OFF_PC, R_CTX);
-    if (g_sh4_jit_direct_indirect && g->info->link && g->fp != FP_UNKNOWN)
+    if (g_sh4_jit_direct_indirect && g->info->link && (g->fp != FP_UNKNOWN || g->info->mmu))
     {
         if (r != 3) ppc_mr(c, 3, r);
         reload(g);
-        if (g->info->fpAny)
+        if (g->info->fpAny || g->fp == FP_UNKNOWN)
         {
             ppc_lwz(c, 7, OFF_FPSCR, R_CTX);
             ppc_rlwinm(c, 7, 7, 0, 11, 13);
@@ -843,6 +856,8 @@ static void store_recheck(PpcCode *c, const ColdStub *s, int size)
     ppc_patch_here(c, code);
 }
 
+static u32 code_test(Gen *g, int size);
+
 static void emit_cold_stub(Gen *g, const ColdStub *s)
 {
     PpcCode *c = g->c;
@@ -885,6 +900,32 @@ static void emit_cold_stub(Gen *g, const ColdStub *s)
         ppc_b_to(c, g->info->exit);
         return;
     }
+    if (s->kind == COLD_MMU_OP)
+    {
+        u32 k, ok;
+        for (k = 0; k + 1 < s->atCount; k++) ppc_patch_here(c, s->atMore[k]);
+        for (k = 0; k < 16; k++)
+            if (s->sreg[k] == RS_DIRTY) ppc_stw(c, H(k), OFF_R(k), R_CTX);
+        for (k = 0; k < 16; k++)
+            if (s->sfr[k] == RS_DIRTY) ppc_stfs(c, FH(k), OFF_FR(k), R_CTX);
+        if (s->st == RS_DIRTY) ppc_stw(c, R_T, OFF_T, R_CTX);
+        ppc_li32(c, 3, s->size ? s->instPc + 4 : s->instPc + 2);
+        ppc_stw(c, 3, OFF_PC, R_CTX);
+        ppc_li32(c, 3, s->op);
+        ppc_li32(c, 4, s->instPc);
+        call_c(c, (const void *)sh4_jit_mmu_op);
+        ppc_cmpwi(c, 0, 3, 0);
+        ok = ppc_bc_fwd(c, 12, 0, PPC_EQ);
+        ppc_b_to(c, g->info->exit);
+        ppc_patch_here(c, ok);
+        for (k = 0; k < 16; k++)
+            if (s->jreg[k] != RS_NONE) ppc_lwz(c, H(k), OFF_R(k), R_CTX);
+        for (k = 0; k < 16; k++)
+            if (s->jfr[k] != RS_NONE) ppc_lfs(c, FH(k), OFF_FR(k), R_CTX);
+        if (s->jt != RS_NONE) ppc_lwz(c, R_T, OFF_T, R_CTX);
+        ppc_b_to(c, c->buf + s->back);
+        return;
+    }
     if (s->kind == COLD_MMU_FPUDIS)
     {
         u32 k;
@@ -904,6 +945,27 @@ static void emit_cold_stub(Gen *g, const ColdStub *s)
     {
         u32 k, ok;
         for (k = 0; k + 1 < s->atCount; k++) ppc_patch_here(c, s->atMore[k]);
+        if (s->lut2 && g_mmu_lut[2])
+        {
+            u32 miss, code, alignEnd = s->size == 4 ? 29 : s->size == 2 ? 30 : 31;
+            ppc_rlwinm(c, 6, 3, 22, 10, 29);
+            ppc_load_ptr_const(c, 5, ppc_addr_of(g_mmu_lut[2]));
+            ppc_lwzx(c, 6, 5, 6);
+            ppc_cmpwi(c, 0, 6, -1);
+            miss = ppc_bc_fwd(c, 12, 0, PPC_EQ);
+            ppc_add(c, 4, 3, 6);
+            ppc_rlwinm(c, 4, 4, 0, 8, alignEnd);
+            code = code_test(g, s->size);
+            if (s->size == 1) ppc_xori(c, 4, 4, 3);
+            else if (s->size == 2) ppc_xori(c, 4, 4, 2);
+            ppc_load_ptr(c, 5, OFF_JRAM, R_CTX);
+            if (s->size == 4) ppc_stwx(c, s->reg, 5, 4);
+            else if (s->size == 2) ppc_sthx(c, s->reg, 5, 4);
+            else ppc_stbx(c, s->reg, 5, 4);
+            ppc_b_to(c, c->buf + s->back);
+            ppc_patch_here(c, miss);
+            ppc_patch_here(c, code);
+        }
         for (k = 0; k < 16; k++)
             if (s->sreg[k] == RS_DIRTY) ppc_stw(c, H(k), OFF_R(k), R_CTX);
         for (k = 0; k < 16; k++)
@@ -1067,6 +1129,7 @@ static void add_cold_mmu(Gen *g, const u32 *br, u32 nb, int kind, int size, u32 
     st.kind = (u8)kind;
     st.size = (u8)size;
     st.reg = (u8)reg;
+    st.lut2 = (u8)(kind == COLD_MMU_STORE && s_coldLut2);
     memcpy(st.sreg, g->reg, sizeof(st.sreg));
     memcpy(st.sfr, g->fr, sizeof(st.sfr));
     if (kind == COLD_MMU_LOAD && reg >= 14 && reg < 30 && g->lastDef == reg - 14) st.sreg[reg - 14] = g->lastDefPrev;
@@ -1182,7 +1245,9 @@ static void emit_store_mmu(Gen *g, u32 rs, int size)
     if (size == 4) ppc_stwx(c, rs, 5, 4);
     else if (size == 2) ppc_sthx(c, rs, 5, 4);
     else ppc_stbx(c, rs, 5, 4);
+    s_coldLut2 = !g->info->md && nb == 1 && g_mmu_lut[0] && g_mmu_lut[1] && g_mmu_lut[2];
     add_cold_mmu(g, br, nb, COLD_MMU_STORE, size, rs);
+    s_coldLut2 = 0;
 }
 
 static void emit_cold(Gen *g)
@@ -1657,6 +1722,22 @@ static u32 t_pend_branch(Gen *g, int whenTaken)
     at = t_pend_bc(g, whenTaken);
     g->tPend = 0;
     return at;
+}
+
+static u16 code_at(Gen *g, u32 addr);
+static int fcmp_rotcl_ahead(Gen *g)
+{
+    u32 end = g->endPc, a = g->pc + 2;
+    u16 op;
+    if (g->inSlot || g->skip.active || g->tPend || a >= end) return 0;
+    op = code_at(g, a);
+    if ((op & 0xF000) == 0x7000)
+    {
+        a += 2;
+        if (a >= end) return 0;
+        op = code_at(g, a);
+    }
+    return (op & 0xF0FF) == 0x4024;
 }
 
 static int is_op(u16 op, u16 mask, u16 key) { return (op & mask) == key; }
@@ -2206,6 +2287,12 @@ static int emit_fpu(Gen *g, u16 op)
         return 1;
     }
     case 0x4: case 0x5:
+        if (fcmp_rotcl_ahead(g))
+        {
+            ppc_fcmpu(c, T_CR, fget(g, n), fget(g, m));
+            t_pend(g, (op & 15) == 4 ? PPC_EQ : PPC_GT, 1);
+            return 1;
+        }
         ppc_fcmpu(c, 0, fget(g, n), fget(g, m));
         ppc_mfocrf(c, 3, 0x80);
         ppc_rlwinm(c, defT(g), 3, (op & 15) == 4 ? 3 : 2, 31, 31);
@@ -2362,6 +2449,92 @@ static void emit_mmu_op(Gen *g, u16 op)
     track_fpscr(g, op);
 }
 
+static int emit_mmu_inline(Gen *g, u16 op)
+{
+    PpcCode *c = g->c;
+    u32 n = (op >> 8) & 15, m = (op >> 4) & 15, lo = op & 15, br[MMU_MAX_AT], nb = 0, k;
+    int isTas = (op & 0xF0FF) == 0x401B, store = 0;
+    u8 sreg[16], sfr[16], st;
+    ColdStub cs;
+    if (!isTas && !((op >> 12) == 0xF && lo >= 6 && lo <= 0xB && (g->fp == FP_UNKNOWN || (g->fp & FPSCR_PR)))) return 0;
+    if (isTas)
+    {
+        ppc_mr(c, 3, get(g, n));
+        store = 1;
+    }
+    else
+    {
+        switch (lo)
+        {
+        case 0x6: ppc_add(c, 3, get(g, 0), get(g, m)); break;
+        case 0x7: ppc_add(c, 3, get(g, 0), get(g, n)); store = 1; break;
+        case 0x8: case 0x9: ppc_mr(c, 3, get(g, m)); break;
+        case 0xA: ppc_mr(c, 3, get(g, n)); store = 1; break;
+        case 0xB: ppc_addi(c, 3, get(g, n), -4); store = 1; break;
+        }
+        if (store) fget(g, m);
+        ppc_lwz(c, 6, OFF_FPSCR, R_CTX);
+        ppc_rlwinm(c, 6, 6, 12, 31, 31);
+        ppc_cmplwi(c, 0, 6, 0);
+        br[nb++] = ppc_bc_fwd(c, 4, 0, PPC_EQ);
+    }
+    memcpy(sreg, g->reg, sizeof(sreg));
+    memcpy(sfr, g->fr, sizeof(sfr));
+    st = g->t;
+    nb += mmu_translate_inline(g, isTas ? 1 : 4, store, br + nb);
+    if (isTas) ppc_xori(c, 4, 4, 3);
+    ppc_load_ptr(c, 5, OFF_JRAM, R_CTX);
+    if (isTas)
+    {
+        ppc_lbzx(c, 6, 5, 4);
+        ppc_addi(c, 7, 6, -1);
+        ppc_ori(c, 6, 6, 0x80);
+        ppc_stbx(c, 6, 5, 4);
+        ppc_rlwinm(c, defT(g), 7, 1, 31, 31);
+    }
+    else if (store)
+    {
+        ppc_stfsx(c, FH(m), 5, 4);
+        if (lo == 0xB) ppc_addi(c, rw(g, n), H(n), -4);
+    }
+    else
+    {
+        ppc_lfsx(c, FH(n), 5, 4);
+        fdef(g, n);
+        if (lo == 0x9) ppc_addi(c, rw(g, m), H(m), 4);
+    }
+    if (store)
+    {
+        g->wrote = 1;
+        fwd_clear(g);
+    }
+    memset(&cs, 0, sizeof(cs));
+    cs.at = br[0];
+    for (k = 1; k < nb; k++) cs.atMore[k - 1] = br[k];
+    cs.atCount = nb;
+    cs.site = ~0u;
+    cs.back = c->pos;
+    cs.kind = COLD_MMU_OP;
+    cs.size = (u8)(g->inSlot != 0);
+    cs.op = op;
+    memcpy(cs.sreg, sreg, sizeof(sreg));
+    memcpy(cs.sfr, sfr, sizeof(sfr));
+    cs.st = st;
+    memcpy(cs.jreg, g->reg, sizeof(cs.jreg));
+    memcpy(cs.jfr, g->fr, sizeof(cs.jfr));
+    cs.jt = g->t;
+    cs.instPc = g->inSlot ? g->pc - 2 : g->pc;
+    if (g->coldCount < MAX_COLD)
+        g->cold[g->coldCount++] = cs;
+    else
+    {
+        u32 over = ppc_b_fwd(c);
+        emit_cold_stub(g, &cs);
+        ppc_patch_here(c, over);
+    }
+    return 1;
+}
+
 static void emit_andi(PpcCode *c, u32 ra, u32 rs, u32 imm)
 {
     u32 lo, hi;
@@ -2401,6 +2574,7 @@ static int emit_native(Gen *g, u16 op)
     n = N;
     m = M;
 
+    if (g->info->mmu && emit_mmu_inline(g, op)) return 1;
     if (g->info->mmu && mem_op(op) && !mmu_native(op) &&
         !((op >> 12) == 0xF && (op & 15) >= 6 && (op & 15) <= 0xB && g->fp != FP_UNKNOWN && !(g->fp & FPSCR_PR)))
     {
@@ -2652,7 +2826,20 @@ static int emit_native(Gen *g, u16 op)
         {
         case 0x24:
         {
-            u32 t = getT(g);
+            u32 t;
+            if (g->tPend)
+            {
+                u32 skip;
+                rn = rw(g, n);
+                ppc_rlwinm(c, 3, rn, 1, 31, 31);
+                ppc_rlwinm(c, rn, rn, 1, 0, 30);
+                skip = t_pend_bc(g, 0);
+                ppc_ori(c, rn, rn, 1);
+                ppc_patch_here(c, skip);
+                ppc_mr(c, defT(g), 3);
+                return 1;
+            }
+            t = getT(g);
             rn = rw(g, n);
             ppc_rlwinm(c, 3, rn, 1, 31, 31);
             ppc_rlwinm(c, rn, rn, 1, 0, 30);
@@ -3439,6 +3626,25 @@ u32 sh4_jit_gen_block(PpcCode *c, u32 pc, const u32 *ops, u32 n, int endsWithBra
         add_cold(&g, bail, COLD_BAIL, 0, 0);
     }
     count_bump(&g, 0);
+    if (info->native)
+    {
+        ppc_addi(c, R_CYC, R_CYC, cycles);
+        writeback(&g);
+        if (g_sh4_jit_mark_blocks)
+        {
+            ppc_li32(c, 3, pc);
+            ppc_stw(c, 3, OFF_PC, R_CTX);
+        }
+        ppc_li32(c, 3, pc);
+        ppc_load_ptr_const(c, 4, ppc_addr_of(info->native));
+        call_c(c, (const void *)sh4_jit_native_call);
+        forget(&g);
+        g.fp = FP_UNKNOWN;
+        ppc_lwz(c, 3, OFF_PC, R_CTX);
+        exit_to_reg(&g, 3);
+        emit_cold(&g);
+        return 1;
+    }
     if (g_sh4_jit_mark_blocks)
     {
         ppc_li32(c, 3, pc);

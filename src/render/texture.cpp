@@ -236,8 +236,22 @@ int tex_decode(const TexDesc *d, const u8 *vram, const u32 *palette, u32 *out)
     if (vq)
     {
         u32 idxAddr = addr + 2048 + (mipmapped ? vq_mip_offset(n) : 0), cb[1024], i;
-        u32 w2 = w / 2 ? w / 2 : 1, h2 = h / 2 ? h / 2 : 1, cf = fmt == 3 ? 1 : fmt;
-        for (i = 0; i < 1024; i++) cb[i] = convert16(cf, buf_r16(vram, (addr + i * 2) & VRAM_MASK));
+        u32 w2 = w / 2 ? w / 2 : 1, h2 = h / 2 ? h / 2 : 1;
+        if (fmt == 3)
+        {
+            for (i = 0; i < 1024; i += 4)
+            {
+                u32 k;
+                for (k = 0; k < 2; k++)
+                {
+                    u32 c0 = buf_r16(vram, (addr + (i + k) * 2) & VRAM_MASK), c1 = buf_r16(vram, (addr + (i + k + 2) * 2) & VRAM_MASK);
+                    cb[i + k] = from_yuv(c0 >> 8, c0 & 0xFF, c1 & 0xFF);
+                    cb[i + k + 2] = from_yuv(c1 >> 8, c0 & 0xFF, c1 & 0xFF);
+                }
+            }
+        }
+        else
+            for (i = 0; i < 1024; i++) cb[i] = convert16(fmt, buf_r16(vram, (addr + i * 2) & VRAM_MASK));
         twiddle_tables(w2, h2, xo, yo);
         for (y = 0; y < h; y++)
         {

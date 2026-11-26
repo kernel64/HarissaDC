@@ -18,6 +18,7 @@
 #include "../../disc/game_files.h"
 #include "../../hw/aica.h"
 #include "../../hw/arm7_jit.h"
+#include "../../hw/cdda.h"
 #include "../../hw/cheat.h"
 #include "../../hw/dreamcast.h"
 #include "../../hw/flash.h"
@@ -43,6 +44,7 @@
 #include "xb_menu.h"
 #include "xb_pad.h"
 #include "xb_pvr.h"
+#include "../../hw/widescreen.h"
 #include "xb_ra.h"
 #include "xb_sampler.h"
 #include "xb_ui.h"
@@ -281,9 +283,21 @@ static const char *const s_transAlwaysLast[] = {
     "T0015M",
 };
 
-static const char *const s_noCountdownSkip[] = {
-    "T15113N",
+static const struct { const char *product; u32 pc; } s_countdownLoop[] = {
+    { "T15113N", 0x8C0DDEFAu },
 };
+
+static const char *const s_wceMsgPoll[] = {
+    "T1205N",
+};
+
+static int wce_msg_poll_of(const char *product)
+{
+    size_t k;
+    for (k = 0; k < sizeof(s_wceMsgPoll) / sizeof(s_wceMsgPoll[0]); k++)
+        if (!strcmp(product, s_wceMsgPoll[k])) return 1;
+    return 0;
+}
 
 static const char *const s_noTmuPollSkip[] = {
     "T1401N",
@@ -293,22 +307,71 @@ static const char *const s_noTmuPollSkip[] = {
 static const char *const s_lateRenderWait[] = {
     "T0015M",
     "T17716N",
+    "T15113N",
 };
 
 static const char *const s_fbReadback[] = {
     "T13002N",
+    "T-8118N",
 };
 
 static const char *const s_slowCpuWhenBehind[] = {
     "T40203N",
+    "T15113N",
 };
 
-static int slow_cpu_when_behind_of(const char *product)
+static const char *const s_noSlowCpuWhenBehind[] = {
+    "T1205N",
+};
+
+#define DISC_USES_WINDOWS_CE 1u
+
+static const char *const s_slowCpuClimb[] = {
+    "T15113N",
+};
+
+static int slow_cpu_climb_of(const char *product)
 {
     size_t k;
-    for (k = 0; k < sizeof(s_slowCpuWhenBehind) / sizeof(s_slowCpuWhenBehind[0]); k++)
-        if (!strcmp(product, s_slowCpuWhenBehind[k])) return 1;
+    for (k = 0; k < sizeof(s_slowCpuClimb) / sizeof(s_slowCpuClimb[0]); k++)
+        if (!strcmp(product, s_slowCpuClimb[k])) return 1;
     return 0;
+}
+
+static int slow_cpu_when_behind_of(const DiscInfo *info)
+{
+    size_t k;
+    for (k = 0; k < sizeof(s_noSlowCpuWhenBehind) / sizeof(s_noSlowCpuWhenBehind[0]); k++)
+        if (!strcmp(info->product, s_noSlowCpuWhenBehind[k])) return 0;
+    if (info->peripherals & DISC_USES_WINDOWS_CE) return 1;
+    for (k = 0; k < sizeof(s_slowCpuWhenBehind) / sizeof(s_slowCpuWhenBehind[0]); k++)
+        if (!strcmp(info->product, s_slowCpuWhenBehind[k])) return 1;
+    return 0;
+}
+
+struct WideProfile
+{
+    const char *product;
+    int mode;
+};
+static const WideProfile s_wideProfile[] = {
+    { "", WIDE_OFF },
+};
+
+static int wide_mode_of(const Config *c, const DiscInfo *info)
+{
+    const WidePatch *patch = wide_patch_find(info);
+    int mode = WIDE_OFF;
+    size_t k;
+    if (!c->gpuRender || c->aspect) mode = WIDE_OFF;
+    else if (c->widescreen == CONFIG_WIDE_REVEAL) mode = WIDE_REVEAL;
+    else if (c->widescreen == CONFIG_WIDE_ANAMORPHIC) mode = WIDE_ANAMORPHIC;
+    else if (c->widescreen == CONFIG_WIDE_AUTO && patch) mode = WIDE_ANAMORPHIC;
+    else if (c->widescreen == CONFIG_WIDE_AUTO && info->product[0])
+        for (k = 0; k < sizeof(s_wideProfile) / sizeof(s_wideProfile[0]); k++)
+            if (!strcmp(info->product, s_wideProfile[k].product)) mode = s_wideProfile[k].mode;
+    wide_patch_set(mode == WIDE_ANAMORPHIC ? patch : NULL);
+    return mode;
 }
 
 static int fb_readback_of(const char *product)
@@ -416,11 +479,11 @@ static int vga_cable_of(const char *product)
     return 0;
 }
 
-static int no_countdown_skip_of(const char *product)
+static u32 countdown_loop_of(const char *product)
 {
     size_t k;
-    for (k = 0; k < sizeof(s_noCountdownSkip) / sizeof(s_noCountdownSkip[0]); k++)
-        if (!strcmp(product, s_noCountdownSkip[k])) return 1;
+    for (k = 0; k < sizeof(s_countdownLoop) / sizeof(s_countdownLoop[0]); k++)
+        if (!strcmp(product, s_countdownLoop[k].product)) return s_countdownLoop[k].pc;
     return 0;
 }
 
@@ -538,7 +601,7 @@ static void shown_resolution(char *out, int size, IDirect3DTexture9 *tex, const 
     sc[sizeof(sc) - 1] = 0;
     for (k = (int)strlen(sc) - 1; k > 0 && sc[k] == '0'; k--) sc[k] = 0;
     if (k > 0 && sc[k] == '.') sc[k] = 0;
-    _snprintf(out, size - 1, "%dx%d  " UI_CH_MIDDOT "  %sx%s", w, h, sc, gpu && cfg->widescreen ? "  16:9" : "");
+    _snprintf(out, size - 1, "%dx%d  " UI_CH_MIDDOT "  %sx%s", w, h, sc, gpu && g_xb_widescreen ? "  16:9" : "");
     out[size - 1] = 0;
 }
 
@@ -547,7 +610,9 @@ static void draw_picture(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex, const Co
     u32 ctrl = pvr_reg(0x005F8044), size = pvr_reg(0x005F805C), depth = (ctrl >> 2) & 3;
     u32 bpp = depth == 2 ? 3 : depth == 3 ? 4 : 2, xWords = (size & 0x3FF) + 1, lines = ((size >> 10) & 0x3FF) + 1;
     int interlaced = (pvr_reg(0x005F80D0) >> 4) & 1;
+    f32 u0, u1;
     if (!tex) return;
+    xb_display_view(xb_pvr_display_view(tex, &u0, &u1), u0, u1);
     xb_display_draw(dev, tex, (int)(xWords * 4 / bpp), (int)(interlaced ? lines * 2 : lines), cfg);
 }
 
@@ -1224,6 +1289,7 @@ static int pause_menu(IDirect3DDevice9 *dev, Config *cfg, const char *gameFolder
             case P_SETTINGS:
                 SettingsScreen(dev, cfg, gameFolder, frozen_game, screen);
                 xb_audio_set_target_ms(cfg->audioMs > 0 ? cfg->audioMs : 120);
+                g_cdda_realtime = cfg->cdRealtime;
                 break;
             case P_LIST: return PAUSE_LIST;
             case P_QUIT:
@@ -1252,13 +1318,14 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
     DiscSet discs;
     LARGE_INTEGER freq, t0, now;
     s64 nextField;
-    int vsync = baseCfg->vsync != 0, fastSeconds = 0;
+    int vsync = baseCfg->vsync != 0, fastSeconds = 0, vsyncWait = 3, vsyncOnSeconds = 0;
     double cpuLoad = 0;
     u64 cyclesAtT0;
     u32 frames = 0, fpsFrames = 0, seconds = 0;
     int skipPresent = 0, skippedLast = 0;
     int audioThread = 0;
     int slowCpuWhenBehind = 0;
+    int slowCpuClimb = 0;
     int gunPort = 0;
     int rotateConv = 0, rotatePending = 0, rotateStreak = 0;
     double fps = 0, speed = 0;
@@ -1274,6 +1341,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
     s_dev = dev;
     gameFolder[0] = 0;
     memset(&discs, 0, sizeof(discs));
+    memset(&info, 0, sizeof(info));
     if (entry && entry[0])
     {
         int r = ArchivePrepare(dev, entry, image, sizeof(image), error, sizeof(error), NULL, NULL);
@@ -1300,6 +1368,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
         g_pvr_gun_hpos = cfg.gunHpos > 0 ? cfg.gunHpos : 286;
     }
     g_sh4_tmu_poll_skip = 1;
+    g_sh4_jit_wce_msg_poll = 0;
     g_mmu_sq_only_ok = cfg.mmuSq == 1;
     {
         extern int g_xb_exact_depth;
@@ -1323,9 +1392,12 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
         gunPort = gun_port_of(info.product);
         gameSoundLag = sound_lag_of(info.product);
         g_ta_trans_always_last = trans_always_last_of(info.product);
-        g_sh4_jit_countdown_skip = cfg.countdown ? cfg.countdown == 1 : !no_countdown_skip_of(info.product);
+        g_sh4_jit_countdown_skip = cfg.countdown != 2;
+        g_sh4_jit_countdown_pc = countdown_loop_of(info.product);
         g_sh4_tmu_poll_skip = !no_tmu_poll_skip_of(info.product);
-        slowCpuWhenBehind = slow_cpu_when_behind_of(info.product);
+        g_sh4_jit_wce_msg_poll = wce_msg_poll_of(info.product);
+        slowCpuWhenBehind = slow_cpu_when_behind_of(&info);
+        slowCpuClimb = slow_cpu_climb_of(info.product);
         {
             extern int g_xb_exact_depth;
             g_xb_exact_depth = cfg.exactDepth ? cfg.exactDepth == 1 : exact_depth_of(info.product);
@@ -1428,7 +1500,10 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
         g_xb_trans_depth = cfg.transDepth;
         { extern int g_xb_huge_depth; g_xb_huge_depth = cfg.hugeDepth; }
         g_xb_fog = cfg.fog;
-        { extern int g_xb_widescreen; g_xb_widescreen = cfg.widescreen; }
+        g_xb_widescreen = wide_mode_of(&cfg, &info);
+        if (cfg.widescreen) LOG_INFO("[emu] 16:9: %s", g_xb_widescreen == WIDE_REVEAL ? "the sides beyond the 4:3 picture shown"
+                                                        : g_xb_widescreen == WIDE_ANAMORPHIC ? (wide_patch_active() ? "the game's 16:9 patch, its picture stretched" : "the picture stretched (the game draws 16:9)")
+                                                                                             : "4:3 picture, the sides filled");
         { extern int g_xb_tex_filter; g_xb_tex_filter = cfg.texFilter; } { extern int g_xb_render_1x; g_xb_render_1x = cfg.renderScale == 1; }
         { extern int g_aica_trace; g_aica_trace = cfg.aicaTrace; }
         {
@@ -1440,6 +1515,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
     }
     sh4_jit_enable(cfg.useJit);
     xb_audio_set_target_ms(cfg.audioMs > 0 ? cfg.audioMs : 120);
+    g_cdda_realtime = cfg.cdRealtime;
     audioThread = xb_audio_start_thread(aica_audio_read, aica_audio_available, cfg.audioStretch);
     dc_set_slice(cfg.slice);
     arm7_jit_enable(cfg.armJit);
@@ -1637,7 +1713,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
             if (!vsync) dev->SetRenderState(D3DRS_PRESENTINTERVAL, D3DPRESENT_INTERVAL_IMMEDIATE);
             { extern int g_xb_tex_filter; g_xb_tex_filter = cfg.texFilter; } { extern int g_xb_render_1x; g_xb_render_1x = cfg.renderScale == 1; }
             maple_set_rumble_pack(cfg.rumble);
-            { extern int g_xb_widescreen; g_xb_widescreen = cfg.widescreen; }
+            g_xb_widescreen = wide_mode_of(&cfg, &info);
             if (r == PAUSE_RESET)
             {
                 dc_reset();
@@ -1686,6 +1762,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
         frames++;
         fpsFrames++;
         cheat_apply(s_cheats);
+        wide_patch_apply();
         XbRaFrame(cheat_active(s_cheats));
         if (cfg.raToast > 0 && frames == (u32)cfg.raToast) XbRaTestToast();
         if (cfg.achAt > 0 && frames == (u32)cfg.achAt) s_achOpen = 1;
@@ -1788,16 +1865,22 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
                 u64 cyclesNow = sched_now();
                 speed = cyclesNow > cyclesAtT0 ? (double)(cyclesNow - cyclesAtT0) / secs / (double)SH4_CLOCK_HZ * 100.0 : 0.0;
             }
-            if (cfg.vsync == 1 && vsync && fps < 57.0)
             {
-                dev->SetRenderState(D3DRS_PRESENTINTERVAL, D3DPRESENT_INTERVAL_IMMEDIATE);
-                vsync = 0;
-                fastSeconds = 0;
-            }
-            else if (cfg.vsync == 1 && !vsync && (fps >= 59.0 ? ++fastSeconds : (fastSeconds = 0)) >= 3)
-            {
-                dev->SetRenderState(D3DRS_PRESENTINTERVAL, D3DPRESENT_INTERVAL_ONE);
-                vsync = 1;
+                if (vsync) vsyncOnSeconds++;
+                if (cfg.vsync == 1 && vsync && fps < 57.0)
+                {
+                    dev->SetRenderState(D3DRS_PRESENTINTERVAL, D3DPRESENT_INTERVAL_IMMEDIATE);
+                    vsync = 0;
+                    fastSeconds = 0;
+                    if (vsyncOnSeconds <= 2) vsyncWait = vsyncWait * 2 > 96 ? 96 : vsyncWait * 2;
+                }
+                else if (cfg.vsync == 1 && !vsync && (fps >= 59.0 ? ++fastSeconds : (fastSeconds = 0)) >= vsyncWait)
+                {
+                    dev->SetRenderState(D3DRS_PRESENTINTERVAL, D3DPRESENT_INTERVAL_ONE);
+                    vsync = 1;
+                    vsyncOnSeconds = 0;
+                }
+                if (vsync && vsyncOnSeconds >= 30) vsyncWait = 3;
             }
             prof_report(fpsFrames, ms);
             {
@@ -1836,14 +1919,15 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
                 static u32 lastYuv;
                 u32 yuv = pvr_yuv_blocks();
                 int pct = dc_cpu_percent(), was = pct;
-                if (yuv - lastYuv >= 60 || slowCpuWhenBehind)
+                int behind = cfg.slowCpu == 1 ? 1 : cfg.slowCpu == 2 ? 0 : slowCpuWhenBehind;
+                if (yuv - lastYuv >= 60 || behind)
                 {
-                    if (fps < 58.0)
+                    if (speed < 96.7)
                     {
-                        pct = (int)(pct * fps / 60.0);
-                        if (pct < (slowCpuWhenBehind ? 40 : 50)) pct = slowCpuWhenBehind ? 40 : 50;
+                        pct = (int)(pct * speed / 100.0);
+                        if (pct < (behind ? 40 : 50)) pct = behind ? 40 : 50;
                     }
-                    else if (ms[PROF_SH4] < 10.0 && pct < 100)
+                    else if (pct < 100 && (behind && slowCpuClimb ? ms[PROF_SH4] * (pct + 5) / pct < 14.5 : ms[PROF_SH4] < 10.0))
                         pct = pct + 5 > 100 ? 100 : pct + 5;
                 }
                 else pct = 100;
@@ -1851,7 +1935,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
                 if (pct != was)
                 {
                     dc_set_cpu_percent(pct);
-                    LOG_INFO("[emu] SH-4 at %d%% of its speed (%s)", pct, pct < 100 ? (slowCpuWhenBehind ? "behind" : "movie") : (slowCpuWhenBehind ? "caught up" : "movie over"));
+                    LOG_INFO("[emu] SH-4 at %d%% of its speed (%s)", pct, pct < 100 ? (behind ? "behind" : "movie") : (behind ? "caught up" : "movie over"));
                 }
             }
             cpuLoad = (ms[PROF_SH4] + ms[PROF_ARM7] + ms[PROF_AICA]) / (1000.0 / 59.94);
@@ -2073,11 +2157,21 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
         if (!audioThread) xb_audio_feed(aica_audio_read, aica_audio_available);
         {
             static int skippedBefore;
-            s64 period = (s64)((double)freq.QuadPart / 59.94);
+            static u64 cyclesBefore;
+            u64 cyclesNow = sched_now(), fieldCycles = cyclesNow - cyclesBefore;
+            double fieldTime = fieldCycles >= SH4_CLOCK_HZ / 75 && fieldCycles <= SH4_CLOCK_HZ / 45 ? (double)fieldCycles / (double)SH4_CLOCK_HZ
+                                                                                                    : 1.0 / 59.94;
+            s64 period = (s64)((double)freq.QuadPart * fieldTime);
             LARGE_INTEGER t;
+            cyclesBefore = cyclesNow;
             QueryPerformanceCounter(&t);
             nextField += period;
-            if ((vsync && !skipPresent && !skippedBefore) || t.QuadPart - nextField > 3 * period) nextField = t.QuadPart;
+            if (vsync && !skipPresent && !skippedBefore)
+            {
+                s64 soonest = nextField - period + (s64)((double)period * (59.94 / 60.3));
+                nextField = t.QuadPart > soonest ? t.QuadPart : soonest;
+            }
+            else if (t.QuadPart - nextField > 3 * period) nextField = t.QuadPart;
             skippedBefore = skipPresent;
             while (t.QuadPart < nextField)
             {
@@ -2125,6 +2219,7 @@ int xb_emu_run(IDirect3DDevice9 *dev, const Config *baseCfg, const char *entry)
     dc_insert_disc(NULL);
     disc_set_read_ahead(-2);
     XbRaGameEnd();
+    wide_patch_set(NULL);
     cheat_free(s_cheats);
     s_cheats = NULL;
     return outcome;

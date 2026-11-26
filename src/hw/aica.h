@@ -18,6 +18,8 @@ u32 host_time(void);
 u32 aica_audio_read(s16 *out, u32 frames);
 u32 aica_audio_available(void);
 
+void aica_cdda_gains(s32 g[4]);
+
 void aica_set_threaded(int on);
 void aica_sample(void);
 int aica_sh4_irq(void);

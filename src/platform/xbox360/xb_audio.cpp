@@ -9,6 +9,8 @@
 #include <string.h>
 
 #include "../../core/log.h"
+#include "../../hw/aica.h"
+#include "../../hw/cdda.h"
 
 #ifndef SOUNDTOUCH_INTEGER_SAMPLES
 #define SOUNDTOUCH_INTEGER_SAMPLES 1
@@ -27,6 +29,15 @@
 #define RATE_SMOOTH 0.05f
 
 static int s_targetMs = 120;
+
+#define CD_SLOT_FRAMES 512
+#define CD_SLOTS 8
+#define CD_QUEUED 4
+#define CD_IDLE_MS 100
+static IXAudio2SourceVoice *s_cdVoice;
+static s16 s_cdSlots[CD_SLOTS][CD_SLOT_FRAMES * 2];
+static int s_cdNext, s_cdPlaying;
+static DWORD s_lastInMs;
 static u64 s_framesSubmitted;
 static float s_ratio = 1.0f, s_ratioApplied = 1.0f;
 static XbAudioStats s_stats;
@@ -100,6 +111,11 @@ int xb_audio_init(void)
         s_voice = NULL;
         return -1;
     }
+    if (FAILED(s_xa->CreateSourceVoice(&s_cdVoice, &wf, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL)))
+    {
+        LOG_WARN("[audio] CreateSourceVoice failed for the CD voice: CD audio through the AICA only");
+        s_cdVoice = NULL;
+    }
     LOG_INFO("[audio] XAudio2 ready, %d Hz stereo 16-bit", XB_AUDIO_RATE);
     return 0;
 }
@@ -114,6 +130,13 @@ void xb_audio_shutdown(void)
         s_thread = NULL;
     }
     lock();
+    if (s_cdVoice)
+    {
+        s_cdVoice->Stop(0);
+        s_cdVoice->FlushSourceBuffers();
+        s_cdVoice->DestroyVoice();
+        s_cdVoice = NULL;
+    }
     if (s_voice)
     {
         s_voice->Stop(0);
@@ -140,9 +163,10 @@ void xb_audio_stats(XbAudioStats *out)
 #define STRETCH_ON 0.95f
 #define STRETCH_OFF 0.985f
 #define STRETCH_MIN 0.40f
-#define STRETCH_MAX 1.15f
+#define STRETCH_MAX 1.04f
 #define STRETCH_GAIN 0.30f
 #define STRETCH_IN 2048
+#define RESERVE_FALL_MS 15
 
 static soundtouch::SoundTouch *s_st;
 static int s_stretchOn;
@@ -151,6 +175,8 @@ static float s_speed = 1.0f, s_tempo = 1.0f;
 static u32 s_speedFrames, s_speedT0;
 static s16 s_in[STRETCH_IN * 2];
 static u32 s_resyncs;
+static u32 s_reserve, s_reserveT;
+static u32 s_drop;
 
 static u32 backlog(const XAUDIO2_VOICE_STATE *vs)
 {
@@ -159,23 +185,64 @@ static u32 backlog(const XAUDIO2_VOICE_STATE *vs)
     return n;
 }
 
-static void resync(u32 (*read)(s16 *out, u32 frames), u32 (*available)(void), u32 excess)
+static void speed_note(u32 frames);
+
+static void resync(u32 excess)
 {
-    u32 n, dropped = 0;
+    u32 held = 0;
     if (s_stretching && s_st)
     {
-        dropped = s_st->numSamples() + s_st->numUnprocessedSamples();
+        held = s_st->numSamples() + s_st->numUnprocessedSamples();
         s_st->clear();
     }
-    while (dropped < excess && (n = available()) > 0)
-    {
-        n = read(s_in, n < STRETCH_IN ? n : STRETCH_IN);
-        if (!n) break;
-        dropped += n;
-    }
-    if (!dropped) return;
+    s_drop = excess > held ? excess - held : 0;
     s_resyncs++;
-    LOG_INFO("[audio] %u ms of sound ahead dropped (it lagged behind the picture)", (u32)((u64)dropped * 1000 / XB_AUDIO_RATE));
+    LOG_INFO("[audio] %u ms of sound ahead dropped (it lagged behind the picture)", (u32)((u64)excess * 1000 / XB_AUDIO_RATE));
+}
+
+static void drop_frames(u32 (*read)(s16 *out, u32 frames), u32 (*available)(void))
+{
+    u32 n;
+    while (s_drop && (n = available()) > 0)
+    {
+        if (n > STRETCH_IN) n = STRETCH_IN;
+        n = read(s_in, n < s_drop ? n : s_drop);
+        if (!n) break;
+        if (s_st && s_stretchOn) speed_note(n);
+        s_drop -= n;
+    }
+}
+
+static u32 reserve(u32 target)
+{
+    u32 now = GetTickCount();
+    if (s_stretching) s_reserve = target * 2;
+    else if (s_reserve > target)
+    {
+        u32 dt = now - s_reserveT, fall;
+        if (dt < 100) return s_reserve;
+        fall = (u32)((u64)dt * RESERVE_FALL_MS * XB_AUDIO_RATE / 1000000);
+        s_reserve = s_reserve > target + fall ? s_reserve - fall : target;
+    }
+    else s_reserve = target;
+    s_reserveT = now;
+    return s_reserve;
+}
+
+static int submit(XAUDIO2_VOICE_STATE *vs, u32 frames)
+{
+    XAUDIO2_BUFFER b;
+    s16 *out = s_slots[s_next];
+    if (frames < SLOT_FRAMES) memset(out + frames * 2, 0, (SLOT_FRAMES - frames) * 2 * sizeof(s16));
+    measure_slot(out);
+    memset(&b, 0, sizeof(b));
+    b.AudioBytes = frames * 2 * sizeof(s16);
+    b.pAudioData = (const BYTE *)out;
+    if (FAILED(s_voice->SubmitSourceBuffer(&b, NULL))) return 0;
+    s_next = (s_next + 1) % SLOTS;
+    s_framesSubmitted += frames;
+    vs->BuffersQueued++;
+    return 1;
 }
 
 static void speed_note(u32 frames)
@@ -217,24 +284,28 @@ static void stretch_feed(u32 (*read)(s16 *out, u32 frames), u32 (*available)(voi
     s_st->setTempo(s_tempo);
     while (vs->BuffersQueued < SLOTS - 1 && s_st->numSamples() >= SLOT_FRAMES)
     {
-        XAUDIO2_BUFFER b;
-        s16 *out = s_slots[s_next];
-        s_st->receiveSamples(out, SLOT_FRAMES);
-        measure_slot(out);
-        memset(&b, 0, sizeof(b));
-        b.AudioBytes = sizeof(s_slots[0]);
-        b.pAudioData = (const BYTE *)out;
-        if (FAILED(s_voice->SubmitSourceBuffer(&b, NULL))) break;
-        s_next = (s_next + 1) % SLOTS;
-        s_framesSubmitted += SLOT_FRAMES;
-        vs->BuffersQueued++;
+        s_st->receiveSamples(s_slots[s_next], SLOT_FRAMES);
+        if (!submit(vs, SLOT_FRAMES)) break;
     }
+}
+
+static void stretch_end(XAUDIO2_VOICE_STATE *vs)
+{
+    s_st->flush();
+    while (vs->BuffersQueued < SLOTS - 1)
+    {
+        u32 n = s_st->receiveSamples(s_slots[s_next], SLOT_FRAMES);
+        if (!n || !submit(vs, n)) break;
+    }
+    s_st->clear();
+    s_stretching = 0;
+    s_reserveT = GetTickCount();
 }
 
 static int feed(u32 (*read)(s16 *out, u32 frames), u32 (*available)(void))
 {
     XAUDIO2_VOICE_STATE vs;
-    u32 pending, target, start;
+    u32 pending, target, start, aim;
     if (!s_voice) return 0;
     s_voice->GetState(&vs);
     target = (u32)((u64)XB_AUDIO_RATE * s_targetMs / 1000);
@@ -259,36 +330,30 @@ static int feed(u32 (*read)(s16 *out, u32 frames), u32 (*available)(void))
             }
             LOG_INFO("[audio] time stretching on (emulation at %d%% speed)", (int)(s_speed * 100.0f + 0.5f));
         }
-        else if (s_stretching && s_speed > STRETCH_OFF && s_st->numSamples() < SLOT_FRAMES && backlog(&vs) <= target + target / 4)
+        else if (s_stretching && s_speed > STRETCH_OFF && backlog(&vs) <= target * 2 + target / 2)
         {
-            s_stretching = 0;
+            stretch_end(&vs);
             LOG_INFO("[audio] time stretching off");
         }
     }
+    aim = reserve(target);
     if (s_playing)
     {
         u32 b = backlog(&vs) + available();
-        u32 t = s_stretching ? target * 2 : target;
-        if (b > t * 2 && b > t + XB_AUDIO_RATE * 15 / 100) resync(read, available, b - t);
+        if (s_drop)
+        {
+            if (b <= aim) s_drop = 0;
+        }
+        else if (b > aim * 2 && b > aim + XB_AUDIO_RATE * 15 / 100) resync(b - aim);
     }
-    if (s_stretching)
-    {
-        stretch_feed(read, available, &vs, s_speed > STRETCH_OFF ? target : target * 2);
-    }
+    else s_drop = 0;
+    drop_frames(read, available);
+    if (s_stretching) stretch_feed(read, available, &vs, aim);
     while (!s_stretching && vs.BuffersQueued < SLOTS - 1 && available() >= SLOT_FRAMES)
     {
-        XAUDIO2_BUFFER b;
-        s16 *out = s_slots[s_next];
         if (s_st && s_stretchOn) speed_note(SLOT_FRAMES);
-        read(out, SLOT_FRAMES);
-        measure_slot(out);
-        memset(&b, 0, sizeof(b));
-        b.AudioBytes = sizeof(s_slots[0]);
-        b.pAudioData = (const BYTE *)out;
-        if (FAILED(s_voice->SubmitSourceBuffer(&b, NULL))) break;
-        s_next = (s_next + 1) % SLOTS;
-        s_framesSubmitted += SLOT_FRAMES;
-        vs.BuffersQueued++;
+        read(s_slots[s_next], SLOT_FRAMES);
+        if (!submit(&vs, SLOT_FRAMES)) break;
     }
     s_voice->GetState(&vs);
     pending = backlog(&vs);
@@ -304,7 +369,7 @@ static int feed(u32 (*read)(s16 *out, u32 frames), u32 (*available)(void))
     }
     else if (!s_stretching)
     {
-        float fill = (float)pending / (float)target;
+        float fill = (float)pending / (float)aim;
         float want = 1.0f + RATE_GAIN * (fill - 1.0f);
         if (want < RATE_MIN) want = RATE_MIN;
         if (want > RATE_MAX) want = RATE_MAX;
@@ -321,10 +386,52 @@ static int feed(u32 (*read)(s16 *out, u32 frames), u32 (*available)(void))
     return (int)vs.BuffersQueued;
 }
 
+static void cd_feed(u32 (*available)(void))
+{
+    XAUDIO2_VOICE_STATE vs;
+    if (!s_cdVoice) return;
+    if (available() > 0) s_lastInMs = GetTickCount();
+    if (!g_cdda_realtime || GetTickCount() - s_lastInMs > CD_IDLE_MS)
+    {
+        if (s_cdPlaying) s_cdVoice->Stop(0);
+        s_cdPlaying = 0;
+        return;
+    }
+    s_cdVoice->GetState(&vs);
+    while (vs.BuffersQueued < CD_QUEUED)
+    {
+        XAUDIO2_BUFFER b;
+        s16 *o = s_cdSlots[s_cdNext];
+        u32 n = cdda_rt_read(o, CD_SLOT_FRAMES), i;
+        s32 g[4];
+        if (!n) break;
+        aica_cdda_gains(g);
+        for (i = 0; i < n; i++)
+        {
+            s32 l = o[i * 2], r = o[i * 2 + 1];
+            s32 L = (s32)(((s64)l * g[0] + (s64)r * g[2]) >> 16), Rr = (s32)(((s64)l * g[1] + (s64)r * g[3]) >> 16);
+            o[i * 2] = (s16)(L > 32767 ? 32767 : L < -32768 ? -32768 : L);
+            o[i * 2 + 1] = (s16)(Rr > 32767 ? 32767 : Rr < -32768 ? -32768 : Rr);
+        }
+        memset(&b, 0, sizeof(b));
+        b.AudioBytes = n * 4;
+        b.pAudioData = (const BYTE *)o;
+        if (FAILED(s_cdVoice->SubmitSourceBuffer(&b, NULL))) break;
+        s_cdNext = (s_cdNext + 1) % CD_SLOTS;
+        vs.BuffersQueued++;
+    }
+    if (!s_cdPlaying && vs.BuffersQueued)
+    {
+        s_cdVoice->Start(0);
+        s_cdPlaying = 1;
+    }
+}
+
 int xb_audio_feed(u32 (*read)(s16 *out, u32 frames), u32 (*available)(void))
 {
     int r;
     lock();
+    cd_feed(available);
     r = feed(read, available);
     unlock();
     return r;
@@ -338,7 +445,11 @@ static DWORD WINAPI audio_thread(LPVOID)
     while (!s_threadQuit)
     {
         lock();
-        if (s_read) feed(s_read, s_available);
+        if (s_read)
+        {
+            cd_feed(s_available);
+            feed(s_read, s_available);
+        }
         unlock();
         Sleep(4);
     }
@@ -355,6 +466,8 @@ int xb_audio_start_thread(u32 (*read)(s16 *out, u32 frames), u32 (*available)(vo
     s_stretching = 0;
     s_speed = s_tempo = 1.0f;
     s_speedT0 = 0;
+    s_reserve = 0;
+    s_drop = 0;
     if (s_st) s_st->clear();
     if (stretch && !s_st)
     {

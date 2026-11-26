@@ -258,6 +258,13 @@ static void update_addresses(int ch)
     c->lea = CH_REG(ch, 0x0C);
 }
 
+static void stopped(int ch)
+{
+    s_ch[ch].on = 0;
+    s_ch[ch].eg = EG_OFF;
+    CH_REG(ch, 0x00) &= (u16)~0x4000u;
+}
+
 static void key_off(int ch)
 {
     if (g_aica_trace && s_ch[ch].on && s_ch[ch].eg != EG_RELEASE)
@@ -339,8 +346,7 @@ static void advance(int ch, AicaChan *c, u32 steps)
             else
             {
                 c->pos = 0;
-                c->on = 0;
-                c->eg = EG_OFF;
+                stopped(ch);
                 return;
             }
         }
@@ -377,11 +383,28 @@ static void envelope(int ch, AicaChan *c)
     if (c->level >= (0x3FFu << 16))
     {
         c->level = 0x3FF << 16;
-        if (c->eg == EG_RELEASE || c->eg == EG_DECAY2) { c->on = 0; c->eg = EG_OFF; }
+        if (c->eg == EG_RELEASE || c->eg == EG_DECAY2) stopped(ch);
     }
 }
 
 static u32 level_att(u32 v15) { return v15 ? (15 - v15) * 32 : 1023; }
+
+void aica_cdda_gains(s32 g[4])
+{
+    u32 mvol = REG(R_MVOL) & 15;
+    s32 master = mvol == 15 ? 65536 : mvol ? s_gain[(15 - mvol) * 32] : 0;
+    int k;
+    for (k = 0; k < 2; k++)
+    {
+        u32 r = REG(0x2040 + k * 4), sdl = (r >> 8) & 15, pan = r & 31, sendl = 0, sendr = 0;
+        s32 v = sdl ? s_gain[level_att(sdl)] : 0;
+        if (pan & 16) sendr = (pan & 15) * 32;
+        else sendl = (pan & 15) * 32;
+        if ((pan & 15) == 15) { if (pan & 16) sendr = 1023; else sendl = 1023; }
+        g[k * 2] = sendl >= 1023 ? 0 : (s32)((((s64)v * s_gain[sendl]) >> 16) * master >> 16);
+        g[k * 2 + 1] = sendr >= 1023 ? 0 : (s32)((((s64)v * s_gain[sendr]) >> 16) * master >> 16);
+    }
+}
 
 void aica_debug_levels(char *out, int size)
 {

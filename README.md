@@ -55,10 +55,39 @@ The list shows one entry, which starts disc 1. When the game asks for the next d
 press BACK, choose **Change disc**, then the disc: the lid opens and closes as on a
 Dreamcast, and the game goes on.
 
+### A game as its own entry in the dashboard
+
+To show a game in Aurora (or another launcher) as its own title, make a small shortcut
+folder for it, next to your `HarissaDC` folder:
+
+1. Create a folder, for example `Hdd:\Emulators\Ikaruga`.
+2. Copy HarissaDC's `default.xex` into it.
+3. Next to it, create a text file `harissadc.ini`:
+
+   ```
+   autoboot=1
+   disc=Hdd1:\Emulators\HarissaDC\games\Ikaruga (Japan).chd
+   datadir=Hdd1:\Emulators\HarissaDC
+   exitto=dashboard
+   ```
+
+- `autoboot=1` and `disc=` start the game directly, without the game list. Write the full
+  path with `Hdd1:\` for the hard disk (not `Hdd:\`), `Usb0:\` for a USB stick.
+- `datadir=` uses your main HarissaDC folder for the settings, memory cards, save states,
+  cheats, box art and BIOS: the shortcut and the main install share them. Keep this path
+  short (32 characters at most). Without it, the shortcut folder keeps its own.
+- `exitto=dashboard`: leaving the game (BACK held, **Back to the game list** or
+  **Quit to the dashboard**)
+  returns to the dashboard.
+
+The cover and background of the entry are set in Aurora, as for any homebrew.
+When you update HarissaDC, copy the new `default.xex` into each shortcut folder too.
+
 ## Controls
 
 **Game list**: A play, Y settings, X about, LB / RB page up / down, LT / RT previous /
-next letter, B add or remove a favourite (favourites are listed first), BACK quit.
+next letter, B add or remove a favourite (favourites are listed first), RS rename the game
+(an empty name gives back its own), BACK quit.
 
 **In game**:
 
@@ -87,9 +116,9 @@ the screen (reload), START is the gun's Start. For other shooting games, add
 
 The settings are sorted into pages, from the game list (Y) and from the in-game menu:
 
-- **Picture**: aspect ratio **4:3**, **16:9** (the 3D is drawn wider, more of the scene on
-  the sides) or **16:9 stretched**, orientation, brightness, size and position of the
-  picture, internal resolution (1.5x or 1x).
+- **Picture**: aspect ratio (see **16:9** below), **Sides** (blurred or black, for a 4:3
+  picture on a 16:9 setting), orientation, brightness, size and position of the picture,
+  internal resolution (1.5x or 1x).
 - **Effects**: presets (Original, Enhanced, Smooth, CRT), texture filter (as the game,
   nearest, bilinear), smoothing, FXAA, sharpening, blur, scanlines, CRT and LCD effects.
   16:9 and the texture filter need the GPU renderer.
@@ -98,13 +127,35 @@ The settings are sorted into pages, from the game list (Y) and from the in-game 
   resolution), box art downloads.
 - **Achievements**: RetroAchievements (see below).
 - **Advanced**: CPU, renderer, BIOS (built-in, Sega's, or Sega's when present), V-Sync,
-  audio margin, memory card (one per game, or one shared). CPU, renderer and BIOS take
+  audio margin, CD audio (follow the game, or real time), **Fewer frames when slow** (when a
+  game falls behind, it keeps its real speed and shows fewer pictures instead of running in
+  slow motion; automatic for the games that need it), memory card (one per game, or one
+  shared). CPU, renderer and BIOS take
   effect at the next start of a game. Sega's BIOS is optional: copy your own
   (`dc_boot.bin` and `dc_flash.bin`) to the `HarissaDC\bios` folder, and games start with
   the Dreamcast's boot animation, as on the real console.
 - The console region (Japan, USA, Europe) is chosen from each disc, nothing to set.
 - Settings are kept with **Save for all games** (or **Save for this game only** from the
   in-game menu).
+
+### 16:9
+
+**Settings > Picture > Aspect ratio**:
+
+- **4:3**: the Dreamcast's picture.
+- **16:9**: for about 150 games, HarissaDC changes the game's own camera, so it shows a
+  wider view at the TV's full resolution (1280x720); the game's 2D overlay (score, timer,
+  menus) is stretched. Other games are shown 4:3, with the sides filled by a blurred copy of
+  the picture (or black: **Sides**).
+- **16:9 wider view**: for any 3D game, shows what the game draws beyond its 4:3 edges;
+  when a game leaves its sides empty, the picture goes back to 4:3 by itself. Games that
+  only draw what their 4:3 view shows can leave gaps or show objects popping in on the sides.
+- **16:9 anamorphic**: for games that have their own 16:9 option (Wacky Races, Toy
+  Commander...): turn it on in the game too.
+- **16:9 stretched**: the 4:3 picture stretched over the whole screen.
+
+The wider view and anamorphic need the GPU renderer. Like every setting, the choice can be
+saved for one game only.
 
 ## Cheats
 
@@ -130,9 +181,18 @@ file or a `.txt` list of codes.
 ## Box art
 
 When the console has a network connection, the game list downloads box art
-(from the libretro thumbnails) and keeps it in the `art` folder. **Settings > Box art
-downloads** turns it off; **Get box art for all games** fetches everything at once.
-The emulator also checks GitHub for a newer release when the list opens.
+(from the libretro thumbnails, Dreamcast and Atomiswave) and keeps it in the `art`
+folder. **Settings > Box art downloads** turns it off; **Get box art for all games**
+fetches everything at once.
+
+## Updates
+
+When the game list opens and a newer release is out on GitHub, HarissaDC offers to install
+it (A: Install, B: Not now). It downloads it, checks it, and replaces only `default.xex`
+(the previous one kept as `default_previous.xex`) and the cheat database, then starts
+again in the new version: save states, memory cards, settings, games and box art are kept.
+If anything fails, nothing is changed. Shortcut folders (see above) are not updated: copy
+the new `default.xex` into them.
 
 ## Files HarissaDC creates
 
@@ -152,7 +212,8 @@ The emulator also checks GitHub for a newer release when the list opens.
 ## Known issues
 
 - Windows CE games (their discs show "Powered by Windows CE": Sega Rally 2,
-  Resident Evil 2, Virtua Cop 2...) are still slow in places.
+  Resident Evil 2, Virtua Cop 2...) run at their real speed but show fewer distinct
+  pictures in their heaviest scenes.
 - Some games have graphical glitches (wrong colours, things drawn in front of or
   behind others), for example in some menus of Daytona USA 2001.
 - Some cutscenes and videos run slowly (for example in Jet Grind Radio) while the

@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 
 #include "sh4.h"
@@ -38,6 +39,9 @@ struct JitBlock
     u32 fpMode;
     u32 nextVersion;
     u32 firstLink, endLink;
+    u32 len;
+    u32 litFirst;
+    u32 litCount;
     u16 idleFails;
     u16 idleHit;
     u16 writeTurns;
@@ -48,6 +52,7 @@ struct JitBlock
     s8 cdReg;
     s16 cdOff;
     u16 cdTurn;
+    u16 cdHold, cdBack;
 };
 #define CD_NO_COPY 0x7FFF
 
@@ -55,6 +60,8 @@ struct LinkSite
 {
     u32 *site, *exit;
     u32 target, off, fpMode;
+    u32 savedTarget;
+    u32 inList;
     u32 next;
     u32 deferred;
 };
@@ -102,9 +109,25 @@ static u8 s_loopBits[RAM_SIZE / 16];
 static u8 s_libWaitBits[RAM_SIZE / 16], s_libPollBits[RAM_SIZE / 16];
 #define LIBPOLL_BIT(off) (s_libPollBits[(off) >> 4] & (1u << (((off) >> 1) & 7)))
 #define LIBWAIT_BIT(off) (s_libWaitBits[(off) >> 4] & (1u << (((off) >> 1) & 7)))
+static u8 *s_shadow;
+static u8 s_litBits[RAM_SIZE / 32];
+
 static void mark_code(u32 off, u32 bytes)
 {
     u32 end = off + bytes;
+    if (g_mmu_on && !s_shadow)
+    {
+        s_shadow = (u8 *)malloc(RAM_SIZE);
+        if (s_shadow) memcpy(s_shadow, g_ram, RAM_SIZE);
+    }
+    {
+        if (s_shadow)
+        {
+            u32 a = off & ~3u, b = (end + 3) & ~3u;
+            if (b > RAM_SIZE) b = RAM_SIZE;
+            if (a < b) memcpy(s_shadow + a, g_ram + a, b - a);
+        }
+    }
     for (off &= ~1u; off < end && off < RAM_SIZE; off += 2) s_codeBits[off >> 4] |= (u8)(1u << ((off >> 1) & 7));
 }
 
@@ -117,11 +140,35 @@ static void mark_insns(u32 off, u32 bytes)
     for (off &= ~1u; off < end && off < RAM_SIZE; off += 2) s_insnBits[off >> 4] |= (u8)(1u << ((off >> 1) & 7));
 }
 
+struct LitRec
+{
+    u32 off, val, size;
+};
+#define LIT_POOL (1u << 18)
+static LitRec *s_litPool;
+static u32 s_litPoolN;
+static int s_litCapture;
+
 void sh4_jit_note_literal(u32 addr, u32 bytes)
 {
-    u32 off = addr & (RAM_SIZE - 1);
+    if (s_litCapture == 1)
+    {
+        u32 o = addr & (RAM_SIZE - 1);
+        if (!s_litPool) s_litPool = (LitRec *)malloc(LIT_POOL * sizeof(LitRec));
+        if (s_litPool && s_litPoolN < LIT_POOL)
+        {
+            LitRec *r = &s_litPool[s_litPoolN++];
+            r->off = o;
+            r->size = bytes;
+            r->val = bytes == 4 ? buf_r32(g_ram, o) : buf_r16(g_ram, o);
+        }
+        else
+            s_litCapture = 2;
+    }
+    u32 off = addr & (RAM_SIZE - 1), w;
     u8 bit = (u8)(1u << ((off >> 9) & 7));
     mark_code(off, bytes);
+    for (w = off & ~3u; w < off + bytes && w < RAM_SIZE; w += 4) s_litBits[w >> 5] |= (u8)(1u << ((w >> 2) & 7));
     if (!(s_pages[off >> 12] & bit))
     {
         s_pages[off >> 12] |= bit;
@@ -301,11 +348,13 @@ void sh4_jit_add_link(u32 *site, u32 *exit, u32 target, u32 off, u32 fpMode, int
     l->site = site;
     l->exit = exit;
     l->target = target;
+    l->savedTarget = target;
     l->off = off;
     l->fpMode = fpMode;
     l->deferred = deferred && !BUSY_BIT(off);
     if (l->deferred) s_loopBits[off >> 4] |= (u8)(1u << ((off >> 1) & 7));
     l->next = s_pageLinks[page];
+    l->inList = 1;
     s_pageLinks[page] = ++s_linkCount;
     idx = l->deferred ? 0 : find_block_at(off, target, fpMode);
     if (idx)
@@ -324,6 +373,7 @@ static void link_resolve(const JitBlock *b)
         if (l->target == DEAD_TARGET)
         {
             *prev = l->next;
+            l->inList = 0;
             continue;
         }
         if (l->target == b->pc && l->off == b->off && sh4_jit_key_match(l->fpMode, b->fpMode) && !l->deferred)
@@ -366,6 +416,7 @@ static void unlink_page(u32 page)
         if (l->target == DEAD_TARGET)
         {
             *prev = l->next;
+            l->inList = 0;
             continue;
         }
         if (*l->site != ppc_b_word(l->site, l->exit)) patch_branch(l->site, l->exit);
@@ -404,11 +455,159 @@ static void kill_block(u32 idx)
     }
 }
 
+#define REV_SLOTS 16384u
+#define REV_WAYS 4u
+#define REV_BYTES 132u
+struct RevEntry
+{
+    u32 idx, pc, off, fpMode, len, linkFirst, linkEnd;
+    u8 bytes[REV_BYTES];
+};
+static RevEntry *s_rev;
+static u32 s_revNext;
+u32 g_sh4_jit_revived;
+
+static u32 rev_hash(const u8 *b, u32 len, u32 pc, u32 mode)
+{
+    u32 h = 2166136261u ^ pc ^ (mode * 31u), i;
+    for (i = 0; i < len; i++) h = (h ^ b[i]) * 16777619u;
+    h ^= h >> 15;
+    h *= 0x2C1B3C6Du;
+    h ^= h >> 12;
+    h *= 0x297A2D39u;
+    h ^= h >> 15;
+    return h;
+}
+
+static RevEntry *rev_set(u32 hash)
+{
+    return &s_rev[(hash & (REV_SLOTS / REV_WAYS - 1)) * REV_WAYS];
+}
+
+static int rev_is(const RevEntry *e, u32 pc, u32 off, u32 fpMode, u32 len, const u8 *bytes)
+{
+    return e->idx && e->pc == pc && e->off == off && e->fpMode == fpMode && e->len == len && !memcmp(e->bytes, bytes, len);
+}
+
+static int rev_same_literals(const JitBlock *a, const JitBlock *b)
+{
+    u32 k;
+    if (a->litCount != b->litCount) return 0;
+    for (k = 0; k < a->litCount; k++)
+    {
+        const LitRec *x = &s_litPool[a->litFirst + k], *y = &s_litPool[b->litFirst + k];
+        if (x->off != y->off || x->val != y->val || x->size != y->size) return 0;
+    }
+    return 1;
+}
+
+static void rev_keep(u32 idx)
+{
+    for (; idx; idx = s_blocks[idx - 1].nextVersion)
+    {
+        JitBlock *b = &s_blocks[idx - 1];
+        RevEntry *set, *e = NULL;
+        u32 w;
+        if (!(b->fpMode & MMU_MODE) || !s_shadow || b->len > REV_BYTES || b->litCount == 0xFFFFu || b->off + b->len > RAM_SIZE ||
+            b->tier2)
+            continue;
+        if (!s_rev) s_rev = (RevEntry *)calloc(REV_SLOTS, sizeof(RevEntry));
+        if (!s_rev) return;
+        set = rev_set(rev_hash(s_shadow + b->off, b->len, b->pc, b->fpMode));
+        for (w = 0; w < REV_WAYS && !e; w++)
+            if (rev_is(&set[w], b->pc, b->off, b->fpMode, b->len, s_shadow + b->off) &&
+                rev_same_literals(&s_blocks[set[w].idx - 1], b))
+                e = &set[w];
+        for (w = 0; w < REV_WAYS && !e; w++)
+            if (!set[w].idx) e = &set[w];
+        if (!e) e = &set[s_revNext++ & (REV_WAYS - 1)];
+        e->idx = idx;
+        e->pc = b->pc;
+        e->off = b->off;
+        e->fpMode = b->fpMode;
+        e->len = b->len;
+        e->linkFirst = b->firstLink;
+        e->linkEnd = b->endLink;
+        memcpy(e->bytes, s_shadow + b->off, b->len);
+    }
+}
+
+static void mark_insns(u32 off, u32 bytes);
+
+static u32 rev_take(u32 off, u32 pc, u32 fpMode, u32 len)
+{
+    RevEntry *set, *e = NULL;
+    JitBlock *b = NULL;
+    u32 k, first, a, end, w;
+    if (!s_rev || len > REV_BYTES || off + len > RAM_SIZE) return 0;
+    set = rev_set(rev_hash(g_ram + off, len, pc, fpMode));
+    for (w = 0; w < REV_WAYS && !e; w++)
+    {
+        if (!rev_is(&set[w], pc, off, fpMode, len, g_ram + off)) continue;
+        b = &s_blocks[set[w].idx - 1];
+        for (k = 0; k < b->litCount; k++)
+        {
+            const LitRec *r = &s_litPool[b->litFirst + k];
+            if ((r->size == 4 ? buf_r32(g_ram, r->off) : buf_r16(g_ram, r->off)) != r->val) break;
+        }
+        if (k == b->litCount) e = &set[w];
+    }
+    if (!e) return 0;
+    s_litCapture = 0;
+    for (k = e->linkFirst; k < e->linkEnd; k++)
+    {
+        LinkSite *l = &s_links[k];
+        u32 t;
+        if (l->savedTarget == DEAD_TARGET) continue;
+        l->target = l->savedTarget;
+        if (!l->inList)
+        {
+            l->next = s_pageLinks[l->off >> 12];
+            s_pageLinks[l->off >> 12] = k + 1;
+            l->inList = 1;
+        }
+        t = l->deferred ? 0 : find_block_at(l->off, l->target, l->fpMode);
+        patch_branch(l->site, t ? s_blocks[t - 1].code : l->exit);
+    }
+    first = e->linkFirst;
+    b->firstLink = first;
+    b->endLink = e->linkEnd;
+    b->nextVersion = s_ramBlock[off >> 1] && s_blocks[s_ramBlock[off >> 1] - 1].pc == pc ? s_ramBlock[off >> 1] : 0;
+    b->idleFails = 0;
+    b->idleHit = 0;
+    b->writeTurns = 0;
+    b->samples = 0;
+    s_ramBlock[off >> 1] = e->idx;
+    jcache_clear_off(off);
+    end = off + len;
+    for (a = off & ~511u; a < end && a < RAM_SIZE; a += 512)
+    {
+        u8 bit = (u8)(1u << ((a >> 9) & 7));
+        if (!(s_pages[a >> 12] & bit))
+        {
+            s_pages[a >> 12] |= bit;
+            sh4_mmu_code_changed(a & ~4095u);
+        }
+    }
+    mark_code(off, len);
+    mark_insns(off, len);
+    for (k = 0; k < b->litCount; k++) sh4_jit_note_literal(s_litPool[b->litFirst + k].off, s_litPool[b->litFirst + k].size);
+    if (((end - 1) >> 12) != (off >> 12)) s_spills[off >> 12] = 1;
+    link_resolve(b);
+    e->idx = 0;
+    g_sh4_jit_revived++;
+    return (u32)(b - s_blocks) + 1;
+}
+
 static void clear_page(u32 page)
 {
     u32 *slot = &s_ramBlock[page * 2048], i;
     for (i = 0; i < 2048; i++)
-        if (slot[i]) kill_block(slot[i]);
+        if (slot[i])
+        {
+            rev_keep(slot[i]);
+            kill_block(slot[i]);
+        }
     memset(slot, 0, 2048 * sizeof(u32));
     memset(&s_codeBits[page * 256], 0, 256);
     memset(&s_insnBits[page * 256], 0, 256);
@@ -416,6 +615,7 @@ static void clear_page(u32 page)
     memset(&s_loopBits[page * 256], 0, 256);
     memset(&s_libWaitBits[page * 256], 0, 256);
     memset(&s_libPollBits[page * 256], 0, 256);
+    memset(&s_litBits[page * 128], 0, 128);
     s_pages[page] = 0;
     s_spills[page] = 0;
     unlink_page(page);
@@ -428,12 +628,94 @@ int sh4_jit_ram_has_code(u32 off)
     return (s_pages[off >> 12] >> ((off >> 9) & 7)) & 3;
 }
 
+static void remark_after_kill(u32 lo, u32 end)
+{
+    u32 h, a;
+    for (a = lo; a < end && a < RAM_SIZE; a += 2)
+        if (!((s_litBits[a >> 5] >> ((a >> 2) & 7)) & 1))
+        {
+            s_codeBits[a >> 4] &= (u8)~(1u << ((a >> 1) & 7));
+            s_insnBits[a >> 4] &= (u8)~(1u << ((a >> 1) & 7));
+        }
+    for (h = lo >= 130 ? (lo - 130) & ~1u : 0; h < end && h < RAM_SIZE; h += 2)
+    {
+        u32 v;
+        for (v = s_ramBlock[h >> 1]; v; v = s_blocks[v - 1].nextVersion)
+        {
+            u32 e = h + s_blocks[v - 1].len, from = h > lo ? h : lo, to = e < end ? e : end;
+            for (a = from; a < to; a += 2)
+            {
+                s_codeBits[a >> 4] |= (u8)(1u << ((a >> 1) & 7));
+                s_insnBits[a >> 4] |= (u8)(1u << ((a >> 1) & 7));
+            }
+        }
+    }
+}
+
+static int kill_covering(u32 off)
+{
+    u32 w0 = off & ~3u, lo = w0 >= 130 ? w0 - 130 : 0, h, killedLo = ~0u, killedHi = 0, killedEnd = 0, *prev, i;
+    for (h = lo & ~1u; h <= w0 + 2; h += 2)
+    {
+        u32 idx = s_ramBlock[h >> 1], v, len = 0;
+        if (!idx) continue;
+        for (v = idx; v; v = s_blocks[v - 1].nextVersion)
+            if (s_blocks[v - 1].len > len) len = s_blocks[v - 1].len;
+        if (h + len <= w0) continue;
+        rev_keep(idx);
+        kill_block(idx);
+        s_ramBlock[h >> 1] = 0;
+        jcache_clear_off(h);
+        if (h < killedLo) killedLo = h;
+        killedHi = h;
+        if (h + len > killedEnd) killedEnd = h + len;
+    }
+    if (killedLo == ~0u)
+    {
+        remark_after_kill(w0, w0 + 4);
+        return 0;
+    }
+    remark_after_kill(killedLo, killedEnd);
+    for (h = killedLo >> 12; h <= killedHi >> 12; h++)
+    {
+        prev = &s_pageLinks[h];
+        while ((i = *prev) != 0)
+        {
+            LinkSite *l = &s_links[i - 1];
+            if (l->target == DEAD_TARGET)
+            {
+                *prev = l->next;
+                l->inList = 0;
+                continue;
+            }
+            if (l->off >= killedLo && l->off <= killedHi && !s_ramBlock[l->off >> 1] && *l->site != ppc_b_word(l->site, l->exit))
+                patch_branch(l->site, l->exit);
+            prev = &l->next;
+        }
+    }
+    return 1;
+}
+
 void sh4_jit_ram_written(u32 off)
 {
     u32 page = off >> 12;
     if (!(s_pages[page] & (1u << ((off >> 9) & 7)))) return;
     s_stats.codePartWrites++;
     if (!CODE_BIT(off) && !CODE_BIT((off & ~3u) + 2) && !CODE_BIT(off & ~3u)) return;
+    if (g_mmu_on && s_shadow)
+    {
+        u32 a = off & ~3u;
+        if (buf_r32(s_shadow, a) == buf_r32(g_ram, a)) return;
+        if (!((s_litBits[a >> 5] >> ((a >> 2) & 7)) & 1) && ((s_insnBits[a >> 4] >> ((a >> 1) & 7)) & 3))
+        {
+            if (kill_covering(off))
+            {
+                sh4_jit_stop_chain();
+                s_stats.invalidations++;
+            }
+            return;
+        }
+    }
     {
         u32 a = off & ~3u;
         if (!((s_insnBits[a >> 4] >> ((a >> 1) & 7)) & 3)) s_litWritten[a >> 5] |= (u8)(1u << ((a >> 2) & 7));
@@ -465,6 +747,9 @@ void sh4_jit_flush(void)
     memset(s_libWaitBits, 0, sizeof(s_libWaitBits));
     memset(s_libPollBits, 0, sizeof(s_libPollBits));
     memset(s_litWritten, 0, sizeof(s_litWritten));
+    memset(s_litBits, 0, sizeof(s_litBits));
+    if (s_rev) memset(s_rev, 0, REV_SLOTS * sizeof(RevEntry));
+    s_litPoolN = 0;
     memset(s_pageLinks, 0, sizeof(s_pageLinks));
     s_blockCount = 0;
     s_linkCount = 0;
@@ -571,17 +856,19 @@ static int countdown_reg(const u8 *before)
 }
 
 #define CD_WINDOW 2048
-static int countdown_verify(u32 pc, int k, s16 *cdOff, u16 *cdTurn)
+#define CD_WINDOW_TURN 64
+#define CD_HOLD_MAX 256
+static int countdown_verify(u32 pc, int k, s16 *cdOff, u16 *cdTurn, u32 words)
 {
     u8 before[IDLE_STATE_SIZE];
     u32 sp = g_sh4.r[15] & 0x1FFFFFFFu, steps, i, lo;
     static u32 s_stack[CD_WINDOW];
     int ok;
     memcpy(before, &g_sh4, IDLE_STATE_SIZE);
-    lo = (sp & ~3u) > CD_WINDOW * 2 ? (sp & ~3u) - CD_WINDOW * 2 : 0;
-    for (i = 0; i < CD_WINDOW; i++) s_stack[i] = mem_read32(lo + i * 4);
+    lo = (sp & ~3u) > words * 2 ? (sp & ~3u) - words * 2 : 0;
+    for (i = 0; i < words; i++) s_stack[i] = mem_read32(lo + i * 4);
     g_mem_watch_lo = lo;
-    g_mem_watch_hi = lo + CD_WINDOW * 4;
+    g_mem_watch_hi = lo + words * 4;
     g_mem_watch_bad = 0;
     g_mem_watch = 1;
     for (steps = 0; steps < 4096; steps++)
@@ -598,7 +885,7 @@ static int countdown_verify(u32 pc, int k, s16 *cdOff, u16 *cdTurn)
     {
         *cdOff = CD_NO_COPY;
         *cdTurn = (u16)(steps + 1);
-        for (i = 0; i < CD_WINDOW && ok; i++)
+        for (i = 0; i < words && ok; i++)
         {
             u32 v = mem_read32(lo + i * 4);
             if (v == s_stack[i]) continue;
@@ -668,6 +955,9 @@ static u32 scan_block(u32 off, u32 *ops, u32 *endsWithBranch, u32 max)
     return n;
 }
 
+struct NativeLoop;
+static const NativeLoop *native_at(u32 off);
+
 static u32 scan_block_mmu(u32 off, u32 pc, u32 *ops, u32 *endsWithBranch, u32 max)
 {
     u32 room = (1024 - (pc & 1023)) / 2, n;
@@ -677,6 +967,26 @@ static u32 scan_block_mmu(u32 off, u32 pc, u32 *ops, u32 *endsWithBranch, u32 ma
     {
         n--;
         *endsWithBranch = 0;
+    }
+    {
+        u32 i;
+        for (i = 0; i < n; i++)
+        {
+            u16 op = (u16)ops[i];
+            if (i && native_at((off + i * 2) & (RAM_SIZE - 1)))
+            {
+                n = i;
+                *endsWithBranch = 0;
+                break;
+            }
+            if (i + 1 < n && ((op & 0xF0FF) == 0x406A || (op & 0xF0FF) == 0x4066))
+            {
+                n = i + 1;
+                *endsWithBranch = 0;
+                break;
+            }
+            if (sh4_jit_has_delay_slot(op) || sh4_jit_side_exit(op) == 2) i++;
+        }
     }
     return n;
 }
@@ -690,6 +1000,7 @@ struct LibLoop
     u32 count;
     const u16 *code;
     int poll;
+    const int *on;
 };
 
 static const u16 s_sofdecServerLoop[42] = {
@@ -714,10 +1025,14 @@ static const u16 s_wceFrameCounter[32] = {
     0xA00A, 0x2842,
 };
 
+int g_sh4_jit_wce_msg_poll;
+static const u16 s_wceMsgPoll[4] = { 0x9001, 0x402B, 0x0009, 0xFDE7 };
+
 static const LibLoop s_libLoops[] = {
-    { "Sofdec server loop", 28, 42, s_sofdecServerLoop, 0 },
-    { "Windows CE DirectDraw Flip", 0, 32, s_wceDdrawFlip, 1 },
-    { "Windows CE frame counter", 0, 32, s_wceFrameCounter, 1 },
+    { "Sofdec server loop", 28, 42, s_sofdecServerLoop, 0, NULL },
+    { "Windows CE DirectDraw Flip", 0, 32, s_wceDdrawFlip, 1, NULL },
+    { "Windows CE frame counter", 0, 32, s_wceFrameCounter, 1, NULL },
+    { "Windows CE message poll", 0, 4, s_wceMsgPoll, 1, &g_sh4_jit_wce_msg_poll },
 };
 
 #define LIB_POLL_CYCLES 4096
@@ -729,6 +1044,7 @@ static int s_pollWaited;
 u32 g_sh4_jit_poll_stats[4];
 
 int g_sh4_jit_countdown_skip = 1;
+u32 g_sh4_jit_countdown_pc;
 
 void sh4_jit_lib_poll(u32 pc)
 {
@@ -766,7 +1082,7 @@ static void lib_wait_check(u32 off)
     {
         const LibLoop *l = &s_libLoops[k];
         u32 start = off - l->head * 2;
-        if (off < l->head * 2 || start + l->count * 2 > RAM_SIZE || buf_r16(g_ram, off) != l->code[l->head]) continue;
+        if ((l->on && !*l->on) || off < l->head * 2 || start + l->count * 2 > RAM_SIZE || buf_r16(g_ram, off) != l->code[l->head]) continue;
         for (i = 0; i < l->count && buf_r16(g_ram, start + i * 2) == l->code[i]; i++) {}
         if (i < l->count) continue;
         if (l->poll)
@@ -780,6 +1096,207 @@ static void lib_wait_check(u32 off)
     }
 }
 
+int g_sh4_jit_native = 1;
+int g_sh4_jit_native_check;
+u32 g_sh4_jit_native_stats[4];
+
+typedef void (*NativeFn)(u32 pc);
+
+struct NativeLoop
+{
+    const char *name;
+    u32 count;
+    const u16 *code;
+    u32 exitRel;
+    NativeFn fn;
+};
+
+static void native_interpret(u32 head, u32 size)
+{
+    u32 guard = 0;
+    g_sh4.pc = head;
+    do
+    {
+        sh4_step();
+        s_stats.interpSteps++;
+    } while (g_sh4.pc >= head && g_sh4.pc < head + size && ++guard < (1u << 24));
+}
+
+static u32 native_ram_read(u32 va)
+{
+    u32 pa;
+    if (va >= 0x80000000u && va < 0xC0000000u && (g_sh4.sr & SR_MD)) pa = va;
+    else if (!sh4_mmu_translate_quiet(va, MMU_READ, &pa)) return ~0u;
+    if ((pa & 0x1C000000u) != 0x0C000000u) return ~0u;
+    return pa & (RAM_SIZE - 1);
+}
+
+static const u16 s_wceD3dClip[30] = {
+    0xF049, 0xF39D, 0xF149, 0xF248, 0x7418, 0xF1FD, 0xE100, 0xF415, 0x4124, 0xF405,
+    0x4124, 0xF135, 0x4124, 0xF035, 0x4124, 0xF235, 0x4124, 0xF425, 0x4124, 0xF245,
+    0x4124, 0x2319, 0x221B, 0x6023, 0xC802, 0x8901, 0x4315, 0x8B01, 0x4510, 0x8BE1,
+};
+
+static void native_wce_clip(u32 pc)
+{
+    u32 r1 = g_sh4.r[1], r2 = g_sh4.r[2], r3 = g_sh4.r[3], r4 = g_sh4.r[4], r5 = g_sh4.r[5], t = g_sh4.t;
+    u32 dn = (g_sh4.fpscr & FPSCR_DN) != 0, ran = 0, page = ~0u, base = 0, i, done = 0;
+    f32 m[16], fr4, X = 0, Y = 0, Z = 0, W = 0;
+    if ((g_sh4.fpscr & (FPSCR_PR | FPSCR_SZ)) || (g_sh4.sr & SR_FD) || (s32)r5 <= 0 || r5 > 0x10000u)
+    {
+        g_sh4_jit_native_stats[1]++;
+        native_interpret(pc, 0x3C);
+        return;
+    }
+    for (i = 0; i < r5; i++)
+    {
+        u32 a = r4 + i * 32, k;
+        for (k = 0; k < 12; k += 4)
+            if (((a + k) & ~1023u) != page)
+            {
+                page = (a + k) & ~1023u;
+                if ((a + k) & 3 || native_ram_read(a + k) == ~0u)
+                {
+                    g_sh4_jit_native_stats[1]++;
+                    native_interpret(pc, 0x3C);
+                    return;
+                }
+            }
+    }
+    memcpy(m, g_sh4.xf, sizeof(m));
+    memcpy(&fr4, &g_sh4.fr[4], 4);
+    page = ~0u;
+    while (!done)
+    {
+        u32 code;
+        const f32 *v;
+        f64 x, y, z;
+        if ((r4 & ~1023u) != page || ((r4 + 8) & ~1023u) != page)
+        {
+            if ((r4 & ~1023u) != ((r4 + 8) & ~1023u))
+            {
+                f32 w3[3];
+                u32 k;
+                for (k = 0; k < 3; k++)
+                {
+                    u32 va = r4 + k * 4;
+                    w3[k] = *(const f32 *)(g_ram + ((native_ram_read(va & ~1023u) + (va & 1023u)) & (RAM_SIZE - 1)));
+                }
+                page = ~0u;
+                v = w3;
+                x = v[0];
+                y = v[1];
+                z = v[2];
+                goto have;
+            }
+            page = r4 & ~1023u;
+            base = native_ram_read(page) - page;
+        }
+        v = (const f32 *)(g_ram + ((r4 + base) & (RAM_SIZE - 1)));
+        x = v[0];
+        y = v[1];
+        z = v[2];
+    have:
+        r4 += 32;
+        X = (f32)((f64)m[0] * x + (f64)m[4] * y + (f64)m[8] * z + (f64)m[12] * 1.0);
+        Y = (f32)((f64)m[1] * x + (f64)m[5] * y + (f64)m[9] * z + (f64)m[13] * 1.0);
+        Z = (f32)((f64)m[2] * x + (f64)m[6] * y + (f64)m[10] * z + (f64)m[14] * 1.0);
+        W = (f32)((f64)m[3] * x + (f64)m[7] * y + (f64)m[11] * z + (f64)m[15] * 1.0);
+        if (dn)
+        {
+            if (fabsf(X) < 1.17549435e-38f) X *= 0.0f;
+            if (fabsf(Y) < 1.17549435e-38f) Y *= 0.0f;
+            if (fabsf(Z) < 1.17549435e-38f) Z *= 0.0f;
+            if (fabsf(W) < 1.17549435e-38f) W *= 0.0f;
+        }
+        code = (u32)(fr4 > Y);
+        code = code << 1 | (u32)(fr4 > X);
+        code = code << 1 | (u32)(Y > W);
+        code = code << 1 | (u32)(X > W);
+        code = code << 1 | (u32)(Z > W);
+        code = code << 1 | (u32)(fr4 > Z);
+        code = code << 1 | (u32)(Z > fr4);
+        r1 = code;
+        r3 &= r1;
+        r2 |= r1;
+        ran += 26;
+        if (r2 & 2)
+        {
+            ran += 2;
+            if ((s32)r3 <= 0)
+            {
+                t = 0;
+                done = 1;
+                break;
+            }
+        }
+        ran += 2;
+        r5--;
+        t = r5 == 0;
+        if (t) done = 1;
+    }
+    g_sh4.r[0] = r2;
+    g_sh4.r[1] = r1;
+    g_sh4.r[2] = r2;
+    g_sh4.r[3] = r3;
+    g_sh4.r[4] = r4;
+    g_sh4.r[5] = r5;
+    g_sh4.t = t;
+    memcpy(&g_sh4.fr[0], &X, 4);
+    memcpy(&g_sh4.fr[1], &Y, 4);
+    memcpy(&g_sh4.fr[2], &Z, 4);
+    memcpy(&g_sh4.fr[3], &W, 4);
+    g_sh4.pc = pc + 0x3C;
+    g_sh4.cycles -= (s32)ran;
+    g_sh4_jit_native_stats[0]++;
+}
+
+static const NativeLoop s_nativeLoops[] = {
+    { "Windows CE Direct3D clip codes", 30, s_wceD3dClip, 0x3C, native_wce_clip },
+};
+
+static const NativeLoop *native_at(u32 off)
+{
+    u32 k, i;
+    if (!g_sh4_jit_native) return NULL;
+    for (k = 0; k < sizeof(s_nativeLoops) / sizeof(s_nativeLoops[0]); k++)
+    {
+        const NativeLoop *l = &s_nativeLoops[k];
+        if (off + l->count * 2 > RAM_SIZE || buf_r16(g_ram, off) != l->code[0]) continue;
+        for (i = 1; i < l->count && buf_r16(g_ram, off + i * 2) == l->code[i]; i++) {}
+        if (i == l->count) return l;
+    }
+    return NULL;
+}
+
+void sh4_jit_native_call(u32 pc, const void *loop)
+{
+    const NativeLoop *l = (const NativeLoop *)loop;
+    Sh4Ctx before, after;
+    if (!g_sh4_jit_native_check)
+    {
+        l->fn(pc);
+        return;
+    }
+    before = g_sh4;
+    l->fn(pc);
+    after = g_sh4;
+    g_sh4 = before;
+    native_interpret(pc, l->exitRel);
+    g_sh4_jit_native_stats[2]++;
+    if (memcmp(g_sh4.r, after.r, sizeof(g_sh4.r)) || memcmp(g_sh4.fr, after.fr, sizeof(g_sh4.fr)) || g_sh4.t != after.t ||
+        g_sh4.pc != after.pc)
+    {
+        u32 k;
+        g_sh4_jit_native_stats[3]++;
+        LOG_INFO("[jit] native %s at %08X differs: pc %08X/%08X t %u/%u", l->name, pc, after.pc, g_sh4.pc, after.t, g_sh4.t);
+        for (k = 0; k < 16; k++)
+            if (g_sh4.r[k] != after.r[k] || g_sh4.fr[k] != after.fr[k])
+                LOG_INFO("[jit]   r%u %08X/%08X fr%u %08X/%08X", k, after.r[k], g_sh4.r[k], k, after.fr[k], g_sh4.fr[k]);
+    }
+}
+
+static u32 s_litFirstOut, s_litCountOut;
 static u32 compile_at(u32 off, u32 pc, u32 fpMode, int tier2)
 {
     PpcCode c;
@@ -814,7 +1331,24 @@ static u32 compile_at(u32 off, u32 pc, u32 fpMode, int tier2)
         if (info.fpAny) fpMode = sh4_jit_any_key(fpMode);
     }
     if (!tier2) lib_wait_check(off);
+    if ((fpMode & MMU_MODE) && !tier2)
+    {
+        u32 r = rev_take(off, pc, fpMode, n * 2 + 2);
+        if (r) return r;
+    }
     info.libPoll = LIBPOLL_BIT(off) != 0;
+    if ((fpMode & MMU_MODE) && !tier2)
+    {
+        const NativeLoop *l = native_at(off);
+        if (l)
+        {
+            static u32 s_nativeSeen;
+            if (!(s_nativeSeen & (1u << (l - s_nativeLoops)))) LOG_INFO("[jit] native %s at %08X", l->name, pc);
+            s_nativeSeen |= 1u << (l - s_nativeLoops);
+            info.native = l;
+            info.fpAny = 0;
+        }
+    }
     info.exit = s_exit;
     info.tier2 = tier2;
     info.busy = BUSY_BIT(off) != 0;
@@ -826,9 +1360,13 @@ static u32 compile_at(u32 off, u32 pc, u32 fpMode, int tier2)
     }
     startLink = s_linkCount;
     sites = s_fastCount;
+    {
+        u32 capFirst = s_litPoolN;
+        s_litCapture = (fpMode & MMU_MODE) && !tier2 ? 1 : 0;
     for (attempt = g_sh4_jit_split ? 0 : 2;; attempt++)
     {
         if (attempt == 0 && s_hotEnd <= s_pos) continue;
+        if (s_litCapture) s_litPoolN = capFirst;
         if (attempt == 1)
             new_pair();
         else if (attempt == 2 && g_sh4_jit_split)
@@ -875,8 +1413,16 @@ static u32 compile_at(u32 off, u32 pc, u32 fpMode, int tier2)
             sh4_jit_gen_block(&c, pc, ops, n, endsWithBranch, &info);
         if (!c.overflow) break;
         s_fastCount = sites;
-        for (k = startLink; k < s_linkCount; k++) s_links[k].target = DEAD_TARGET;
-        if (attempt >= 2) return 0;
+        for (k = startLink; k < s_linkCount; k++) s_links[k].target = s_links[k].savedTarget = DEAD_TARGET;
+        if (attempt >= 2)
+        {
+            s_litCapture = 0;
+            return 0;
+        }
+    }
+        s_litFirstOut = capFirst;
+        s_litCountOut = s_litCapture == 1 ? s_litPoolN - capFirst : 0xFFFFu;
+        s_litCapture = 0;
     }
     if (tier2)
     {
@@ -910,9 +1456,13 @@ static u32 compile_at(u32 off, u32 pc, u32 fpMode, int tier2)
     b->nextVersion = s_ramBlock[off >> 1] && s_blocks[s_ramBlock[off >> 1] - 1].pc == pc ? s_ramBlock[off >> 1] : 0;
     b->firstLink = startLink;
     b->endLink = s_linkCount;
+    b->len = n * 2 + 2;
+    b->litFirst = s_litFirstOut;
+    b->litCount = s_litCountOut;
     b->idleFails = 0;
     b->idleHit = 0;
     b->countdown = 0;
+    b->cdHold = b->cdBack = 0;
     b->cdReg = -1;
     b->cdOff = CD_NO_COPY;
     b->cdTurn = 0;
@@ -1214,7 +1764,7 @@ void sh4_jit_run(s32 cycles)
             {
                 JitBlock *b = &s_blocks[idx - 1];
                 if (idle_detect(pc, mode) && ++b->writeTurns >= BUSY_FAILS && !b->idleHit && !b->promoted && b->countdown != 1 &&
-                    (b->countdown == 2 || b->writeTurns >= 4 * BUSY_FAILS))
+                    b->countdown != 3 && (b->countdown == 2 || b->writeTurns >= 4 * BUSY_FAILS))
                 {
                     b->promoted = 1;
                     promote_head(pc);
@@ -1231,28 +1781,51 @@ void sh4_jit_run(s32 cycles)
         {
             int k = g_sh4_irq_ready ? -1 : countdown_reg(s_idleState), v = -1;
             JitBlock *b = idx ? &s_blocks[idx - 1] : NULL;
-            if (k >= 0 && b && b->countdown != 2 && g_sh4_jit_countdown_skip)
+            int each = g_sh4_jit_countdown_pc != 0;
+            if (each && pc != g_sh4_jit_countdown_pc)
+                ;
+            else if (k >= 0 && b && b->countdown != 2 && g_sh4_jit_countdown_skip && each && b->cdHold)
+                b->cdHold--;
+            else if (k >= 0 && b && b->countdown != 2 && g_sh4_jit_countdown_skip)
             {
                 s16 cdOff = CD_NO_COPY;
                 u16 cdTurn = 0;
-                if (b->countdown == 0 && (v = countdown_verify(pc, k, &cdOff, &cdTurn)) == 1)
+                int known = b->countdown == 1;
+                if (!known)
                 {
-                    b->cdReg = (s8)k;
-                    b->cdOff = cdOff;
-                    b->cdTurn = cdTurn;
+                    if ((v = countdown_verify(pc, k, &cdOff, &cdTurn, CD_WINDOW)) == 1)
+                    {
+                        b->cdReg = (s8)k;
+                        b->cdOff = cdOff;
+                        b->cdTurn = cdTurn;
+                    }
                 }
-                if (b->countdown == 1 || v == 1)
+                else if (each && (v = countdown_verify(pc, k, &cdOff, &cdTurn, CD_WINDOW_TURN)) == 1 &&
+                         (cdTurn != b->cdTurn || k != b->cdReg))
+                    v = 0;
+                if (v == 1 || (known && !each))
                 {
-                    if (b->countdown == 1 && b->cdReg != k) b->cdTurn = 0;
+                    if (known && b->cdReg != k) b->cdTurn = 0;
                     b->countdown = 1;
                     b->idleHit = 1;
+                    b->cdBack = 0;
                     countdown_skip(b);
                     s_stats.idleSkips++;
                     g_sh4_idle = 1;
                     g_sh4.cycles = 0;
                     break;
                 }
-                if (v == 0) b->countdown = 2;
+                if (v == 0)
+                {
+                    if (!each)
+                        b->countdown = 2;
+                    else
+                    {
+                        if (!known) b->countdown = 3;
+                        b->cdBack = b->cdBack ? (u16)(b->cdBack * 2 > CD_HOLD_MAX ? CD_HOLD_MAX : b->cdBack * 2) : 1;
+                        b->cdHold = b->cdBack;
+                    }
+                }
                 s_idlePc = 0;
                 continue;
             }

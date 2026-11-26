@@ -129,9 +129,76 @@ static void RC_CCONV server_call(const rc_api_request_t *request, rc_client_serv
     SetEvent(s_wake);
 }
 
+#define SNAP_SLOTS 4096u
+#define SNAP_BYTES 8u
+struct SnapSlot
+{
+    u32 addr;
+    u8 len, used, pad[2];
+    u8 data[SNAP_BYTES];
+};
+static SnapSlot s_snap[SNAP_SLOTS];
+static u32 s_snapCount;
+static HANDLE s_evalThread, s_evalGo, s_evalDone;
+static DWORD s_evalTid;
+static volatile int s_evalBusy;
+static int s_evalIdleOnly;
+struct RaEventCopy
+{
+    int type;
+    const rc_client_achievement_t *achievement;
+};
+#define EVQ_MAX 64
+static RaEventCopy s_evq[EVQ_MAX];
+static int s_evqCount;
+
+static uint32_t snap_read(uint32_t address, uint8_t *buffer, uint32_t count)
+{
+    u32 h = (address * 2654435761u) >> 20, i;
+    for (i = 0; i < 16; i++)
+    {
+        SnapSlot *e = &s_snap[(h + i) & (SNAP_SLOTS - 1)];
+        if (e->used && e->addr == address && e->len == count)
+        {
+            memcpy(buffer, e->data, count);
+            return count;
+        }
+        if (!e->used)
+        {
+            u32 n = ra_dc_read(address, buffer, count);
+            if (n == count && s_snapCount < SNAP_SLOTS * 3 / 4)
+            {
+                e->addr = address;
+                e->len = (u8)count;
+                memcpy(e->data, buffer, count);
+                e->used = 1;
+                s_snapCount++;
+            }
+            return n;
+        }
+    }
+    return ra_dc_read(address, buffer, count);
+}
+
+static void snap_refresh(void)
+{
+    u32 i;
+    if (!s_snapCount) return;
+    for (i = 0; i < SNAP_SLOTS; i++)
+        if (s_snap[i].used) ra_dc_read(s_snap[i].addr, s_snap[i].data, s_snap[i].len);
+}
+
+static void snap_clear(void)
+{
+    memset(s_snap, 0, sizeof(s_snap));
+    s_snapCount = 0;
+}
+
 static uint32_t RC_CCONV read_memory(uint32_t address, uint8_t *buffer, uint32_t count, rc_client_t *)
 {
-    return s_running ? ra_dc_read(address, buffer, count) : 0;
+    if (!s_running) return 0;
+    if (count <= SNAP_BYTES && s_evalThread && GetCurrentThreadId() == s_evalTid) return snap_read(address, buffer, count);
+    return ra_dc_read(address, buffer, count);
 }
 
 static rc_clock_t RC_CCONV now_ms(const rc_client_t *)
@@ -478,6 +545,17 @@ static void unlocks_append(const char *line)
 static void RC_CCONV on_event(const rc_client_event_t *e, rc_client_t *client)
 {
     char text[200], line[128], badge[24];
+    if (s_evalThread && GetCurrentThreadId() == s_evalTid)
+    {
+        if ((e->type == RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED || e->type == RC_CLIENT_EVENT_GAME_COMPLETED ||
+             e->type == RC_CLIENT_EVENT_DISCONNECTED || e->type == RC_CLIENT_EVENT_RECONNECTED) && s_evqCount < EVQ_MAX)
+        {
+            s_evq[s_evqCount].type = (int)e->type;
+            s_evq[s_evqCount].achievement = e->achievement;
+            s_evqCount++;
+        }
+        return;
+    }
     const rc_client_game_t *game = rc_client_get_game_info(client);
     u32 gameId = game ? game->id : 0;
     switch (e->type)
@@ -624,6 +702,34 @@ static void token_login(void)
     rc_client_begin_login_with_token(s_client, s_user, s_token, on_login, NULL);
 }
 
+static DWORD WINAPI eval_thread(LPVOID)
+{
+    for (;;)
+    {
+        WaitForSingleObject(s_evalGo, INFINITE);
+        if (s_evalIdleOnly) rc_client_idle(s_client);
+        else rc_client_do_frame(s_client);
+        s_evalBusy = 0;
+        SetEvent(s_evalDone);
+    }
+}
+
+static void ra_sync(void)
+{
+    int i, n;
+    if (s_evalBusy) WaitForSingleObject(s_evalDone, INFINITE);
+    n = s_evqCount;
+    s_evqCount = 0;
+    for (i = 0; i < n; i++)
+    {
+        rc_client_event_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.type = (uint32_t)s_evq[i].type;
+        ev.achievement = s_evq[i].achievement;
+        on_event(&ev, s_client);
+    }
+}
+
 static void client_make(void)
 {
     if (s_client) return;
@@ -641,6 +747,18 @@ static void client_make(void)
     {
         XSetThreadProcessor(s_thread, 3);
         ResumeThread(s_thread);
+    }
+    s_evalGo = CreateEvent(NULL, FALSE, FALSE, NULL);
+    s_evalDone = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (s_evalGo && s_evalDone)
+    {
+        HANDLE t = CreateThread(NULL, 256 * 1024, eval_thread, NULL, CREATE_SUSPENDED, &s_evalTid);
+        if (t)
+        {
+            XSetThreadProcessor(t, 3);
+            s_evalThread = t;
+            ResumeThread(t);
+        }
     }
     unlocks_load();
     if (s_onUnlock) s_onUnlock();
@@ -673,6 +791,7 @@ void XbRaSetEnabled(int on)
     }
     else
     {
+        ra_sync();
         if (s_client && s_gameAsked) rc_client_unload_game(s_client);
         s_gameAsked = 0;
         s_enabled = 0;
@@ -750,6 +869,7 @@ void XbRaAccount(void)
     if (!s_client || !s_enabled || s_kb || s_state == XB_RA_BUSY) return;
     if (s_state == XB_RA_IN)
     {
+        ra_sync();
         if (s_gameAsked) rc_client_unload_game(s_client);
         rc_client_logout(s_client);
         s_gameAsked = 0;
@@ -800,6 +920,7 @@ void XbRaPump(void)
 void XbRaFrame(int cheats)
 {
     if (!s_client || !s_enabled || !s_running) return;
+    ra_sync();
     XbRaPump();
     if (!s_cheated && cheats)
     {
@@ -807,8 +928,11 @@ void XbRaFrame(int cheats)
         LOG_INFO("[ra] a cheat is on: achievements paused until the game restarts");
         toast(Tr(T_RA_CHEATS_OFF), 5000);
     }
-    if (s_cheated) rc_client_idle(s_client);
-    else rc_client_do_frame(s_client);
+    if (!s_evalThread)
+    {
+        if (s_cheated) rc_client_idle(s_client);
+        else rc_client_do_frame(s_client);
+    }
     if (++s_frames % 300 == 0)
     {
         static char s_presence[256];
@@ -821,11 +945,20 @@ void XbRaFrame(int cheats)
             LOG_INFO("[ra] presence: %s", now);
         }
     }
+    if (s_evalThread)
+    {
+        snap_refresh();
+        s_evalIdleOnly = s_cheated;
+        s_evalBusy = 1;
+        SetEvent(s_evalGo);
+    }
 }
 
 void XbRaGameStart(const char *image)
 {
     char why[96];
+    ra_sync();
+    snap_clear();
     s_running = 1;
     s_gameAsked = 0;
     s_cheated = 0;
@@ -850,6 +983,8 @@ void XbRaGameStart(const char *image)
 
 void XbRaGameEnd(void)
 {
+    ra_sync();
+    snap_clear();
     if (s_client && s_gameAsked) rc_client_unload_game(s_client);
     s_gameAsked = 0;
     s_running = 0;
@@ -858,6 +993,7 @@ void XbRaGameEnd(void)
 void XbRaReset(int cheats)
 {
     if (!s_client || !s_enabled || !s_running) return;
+    ra_sync();
     rc_client_reset(s_client);
     if (s_cheated && !cheats) s_cheated = 0;
 }
@@ -875,6 +1011,7 @@ void XbRaStateSaved(const char *statePath)
     u8 *buf;
     FILE *f;
     state_side(path, sizeof(path), statePath);
+    ra_sync();
     if (!s_client || !s_enabled || !s_running || !s_gameAsked)
     {
         DeleteFileA(path);
@@ -910,6 +1047,7 @@ void XbRaStateLoaded(const char *statePath)
     FILE *f;
     int r;
     if (!s_client || !s_enabled || !s_running) return;
+    ra_sync();
     state_side(path, sizeof(path), statePath);
     f = fopen(path, "rb");
     if (f)

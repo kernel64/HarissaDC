@@ -4,6 +4,7 @@
 #include "xb_menu.h"
 #include "xb_art.h"
 #include "xb_pad.h"
+#include "xb_log.h"
 #include "xb_update.h"
 #include "xb_display.h"
 #include "xb_lang.h"
@@ -14,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 
 #include "../../core/log.h"
 #include "../../core/version.h"
@@ -330,7 +332,10 @@ enum
     G_PRESET, G_TEXFILTER, G_SMOOTH, G_FXAA, G_SHARPEN, G_BLUR, G_SCREEN,
     S_LANGUAGE, S_FPS, S_ART_DL, S_ART_ALL,
     S_CPU, S_RENDERER, S_BIOS, G_VSYNC, S_AUDIO, S_VMU,
-    G_RES
+    G_RES,
+    S_CDAUDIO,
+    S_SLOWCPU,
+    G_SIDES
 };
 
 static const char *chev(int id)
@@ -383,16 +388,21 @@ static const char *arrows(char *buf, int size, const char *fmt, int v)
 
 static int s_fromList, s_artAll;
 
+#define FORMATS 5
 static int format_of(const Config *c)
 {
-    if (c->widescreen && c->gpuRender) return 1;
-    return c->aspect || c->widescreen ? 2 : 0;
+    if (c->aspect) return 4;
+    if (c->widescreen == CONFIG_WIDE_AUTO) return 1;
+    if (c->widescreen == CONFIG_WIDE_REVEAL || c->widescreen == CONFIG_WIDE_ANAMORPHIC)
+        return c->gpuRender ? (c->widescreen == CONFIG_WIDE_REVEAL ? 2 : 3) : 1;
+    return 0;
 }
 
 static void format_set(Config *c, int f)
 {
-    c->widescreen = f == 1;
-    c->aspect = f == 2;
+    static const int wides[FORMATS] = { CONFIG_WIDE_OFF, CONFIG_WIDE_AUTO, CONFIG_WIDE_REVEAL, CONFIG_WIDE_ANAMORPHIC, CONFIG_WIDE_OFF };
+    c->widescreen = wides[f >= 0 && f < FORMATS ? f : 0];
+    c->aspect = f == 4;
 }
 
 static int rotate_of(const Config *c)
@@ -435,7 +445,7 @@ static int controls_custom(const Config *c)
 static void settings_page(UiMenu *m, const Config *c, int page, int perGame, int sel)
 {
     static const int titles[PG_COUNT] = { T_SETTINGS, T_PICTURE, T_EFFECTS, T_INTERFACE, T_ACHIEVEMENTS, T_ADVANCED };
-    static const int formats[3] = { T_ASPECT_43, T_ASPECT_WIDE, T_ASPECT_STRETCH };
+    static const int formats[FORMATS] = { T_ASPECT_43, T_ASPECT_WIDE, T_ASPECT_REVEAL, T_ASPECT_ANAMORPHIC, T_ASPECT_STRETCH };
     char v[72];
     int title = page == PG_MAIN && !perGame ? T_SETTINGS_ALL : titles[page];
     UiMenuClear(m, Tr(title), Tr(T_FOOT_SELECT));
@@ -456,6 +466,7 @@ static void settings_page(UiMenu *m, const Config *c, int page, int perGame, int
         static const int orients[4] = { T_ORIENT_AUTO, T_ORIENT_NORMAL, T_ORIENT_90, T_ORIENT_270 };
         static const int bright[3] = { T_NORMAL, T_LIGHTER, T_MUCH_LIGHTER };
         UiMenuAdd(m, G_FORMAT, Tr(T_ASPECT), chev(formats[format_of(c)]));
+        if (c->widescreen) UiMenuAdd(m, G_SIDES, Tr(T_SIDES), chev(c->sideFill ? T_SIDES_BLUR : T_SIDES_BLACK));
         if (c->gpuRender) UiMenuAdd(m, G_RES, Tr(T_RES_INTERNAL), chev(c->renderScale == 1 ? T_RES_1X : T_RES_15X));
         UiMenuAdd(m, G_ROTATE, Tr(T_ORIENTATION), chev(orients[rotate_of(c)]));
         UiMenuAdd(m, G_BRIGHT, Tr(T_BRIGHTNESS), chev(bright[c->brightness >= 0 && c->brightness <= 2 ? c->brightness : 0]));
@@ -510,10 +521,12 @@ static void settings_page(UiMenu *m, const Config *c, int page, int perGame, int
     {
         static const int bios[3] = { T_BIOS_HLE, T_BIOS_REAL, T_BIOS_AUTO };
         UiMenuAdd(m, S_CPU, Tr(T_CPU_NEXT), chev(c->useJit ? T_RECOMPILER : T_INTERPRETER));
+        UiMenuAdd(m, S_SLOWCPU, Tr(T_SLOW_CPU), chev(c->slowCpu == 1 ? T_ON : c->slowCpu == 2 ? T_OFF : T_ORIENT_AUTO));
         UiMenuAdd(m, S_RENDERER, Tr(T_RENDERER_NEXT), chev(c->gpuRender ? T_GPU : T_SOFTWARE));
         UiMenuAdd(m, S_BIOS, Tr(T_BIOS_NEXT), chev(bios[c->biosMode >= 0 && c->biosMode <= 2 ? c->biosMode : 0]));
         UiMenuAdd(m, G_VSYNC, Tr(T_VSYNC), c->vsync == 2 ? chev(T_VSYNC_STRICT) : onoff(c->vsync));
         UiMenuAdd(m, S_AUDIO, Tr(T_AUDIO_MARGIN), arrows(v, sizeof(v), "%d ms", s_audioSteps[audio_step_of(c->audioMs)]));
+        UiMenuAdd(m, S_CDAUDIO, Tr(T_CD_AUDIO), chev(c->cdRealtime ? T_CD_REALTIME : T_CD_GAME));
         UiMenuAdd(m, S_VMU, Tr(T_VMU_CARD), chev(c->vmuShared ? T_VMU_SHARED : T_VMU_PER_GAME));
         break;
     }
@@ -955,10 +968,12 @@ static int settings_change(Config *c, int id, int dir)
     case S_CPU: c->useJit = !c->useJit; return 1;
     case S_RENDERER:
         c->gpuRender = !c->gpuRender;
-        if (!c->gpuRender && c->widescreen) format_set(c, 2);
+        if (!c->gpuRender && c->widescreen) c->widescreen = CONFIG_WIDE_AUTO;
         return 1;
     case S_BIOS: c->biosMode = cycle(c->biosMode >= 0 && c->biosMode <= 2 ? c->biosMode : 0, 3, dir); return 1;
     case S_AUDIO: c->audioMs = s_audioSteps[clampi(audio_step_of(c->audioMs) + dir, 0, AUDIO_STEPS - 1)]; return 1;
+    case S_CDAUDIO: c->cdRealtime = !c->cdRealtime; return 1;
+    case S_SLOWCPU: c->slowCpu = cycle(c->slowCpu >= 0 && c->slowCpu <= 2 ? c->slowCpu : 0, 3, dir); return 1;
     case S_FPS: c->showFps = cycle(c->showFps, 4, dir); return 1;
     case S_ART_DL: c->artDownload = !c->artDownload; return 1;
     case S_VMU: c->vmuShared = !c->vmuShared; return 1;
@@ -970,11 +985,12 @@ static int settings_change(Config *c, int id, int dir)
     }
     case G_FORMAT:
     {
-        int f = cycle(format_of(c), 3, dir);
-        if (f == 1 && !c->gpuRender) f = cycle(f, 3, dir);
+        int f = cycle(format_of(c), FORMATS, dir);
+        while ((f == 2 || f == 3) && !c->gpuRender) f = cycle(f, FORMATS, dir);
         format_set(c, f);
         return 1;
     }
+    case G_SIDES: c->sideFill = !c->sideFill; return 1;
     case G_ROTATE:
     {
         static const int values[4] = { -1, 0, 90, 270 };
@@ -1331,6 +1347,7 @@ struct GameEntry
     int archive;
     int sub;
     int fav;
+    int renamed;
 };
 
 static GameEntry *s_games;
@@ -1376,6 +1393,7 @@ static void scan_dir(const char *dir, int depth)
     FindClose(f);
 }
 
+#define CACHE_VERSION "#2"
 static const char *list_cache_path(void)
 {
     static char path[64];
@@ -1403,6 +1421,11 @@ static void cache_load(void)
 {
     char *text = read_text(CACHE_PATH), *line;
     if (!text) return;
+    if (strncmp(text, CACHE_VERSION, strlen(CACHE_VERSION)) != 0)
+    {
+        free(text);
+        return;
+    }
     line = strtok(text, "\r\n");
     while (line)
     {
@@ -1422,6 +1445,7 @@ static void cache_load(void)
             split_field(&p, g->info.areas, sizeof(g->info.areas));
             split_field(&p, g->info.maker, sizeof(g->info.maker));
             split_field(&p, g->info.device, sizeof(g->info.device));
+            g->info.titleOdd = *p == '1';
             g->infoOk = g->info.title[0] != 0;
             break;
         }
@@ -1433,15 +1457,17 @@ static void cache_load(void)
 static void cache_save(void)
 {
     char *text = (char *)malloc(GAMES_MAX * 512);
-    int n = 0, i;
+    int n, i;
     if (!text) return;
+    n = _snprintf(text, GAMES_MAX * 512, "%s\r\n", CACHE_VERSION);
     for (i = 0; i < s_gameCount; i++)
     {
         const GameEntry *g = &s_games[i];
         int r;
         if (!g->infoOk) continue;
-        r = _snprintf(text + n, GAMES_MAX * 512 - n, "%s|%u|%s|%s|%s|%s|%s|%s|%s\r\n", g->path, g->size, g->info.title,
-                      g->info.product, g->info.version, g->info.date, g->info.areas, g->info.maker, g->info.device);
+        r = _snprintf(text + n, GAMES_MAX * 512 - n, "%s|%u|%s|%s|%s|%s|%s|%s|%s|%d\r\n", g->path, g->size, g->info.title,
+                      g->info.product, g->info.version, g->info.date, g->info.areas, g->info.maker, g->info.device,
+                      g->info.titleOdd ? 1 : 0);
         if (r < 0) break;
         n += r;
     }
@@ -1595,6 +1621,111 @@ static int fav_toggle(int sel)
     return 0;
 }
 
+static void default_name(GameEntry *g)
+{
+    if (g->infoOk && !g->info.titleOdd) strncpy(g->shown, g->info.title, sizeof(g->shown) - 1);
+    else
+        game_display_name(base_of(g->path), g->shown, sizeof(g->shown));
+    g->shown[sizeof(g->shown) - 1] = 0;
+    g->renamed = 0;
+}
+
+static void copy_utf8(char *out, size_t size, const char *in)
+{
+    size_t len = strlen(in);
+    if (len > size - 1)
+    {
+        len = size - 1;
+        while (len > 0 && ((unsigned char)in[len] & 0xC0) == 0x80) len--;
+    }
+    memcpy(out, in, len);
+    out[len] = 0;
+}
+
+static void names_path(char *out, int size)
+{
+    xb_fs_data_path(out, size, "config", "names.txt");
+}
+
+static void names_load(void)
+{
+    char path[96], line[CONFIG_PATH_MAX + 160];
+    FILE *f;
+    int i;
+    names_path(path, sizeof(path));
+    f = fopen(path, "rb");
+    if (!f) return;
+    while (fgets(line, sizeof(line), f))
+    {
+        char *bar;
+        line[strcspn(line, "\r\n")] = 0;
+        bar = strchr(line, '|');
+        if (!bar || !bar[1]) continue;
+        *bar = 0;
+        for (i = 0; i < s_gameCount; i++)
+            if (!_stricmp(s_games[i].path, line))
+            {
+                copy_utf8(s_games[i].shown, sizeof(s_games[i].shown), bar + 1);
+                s_games[i].renamed = 1;
+            }
+    }
+    fclose(f);
+}
+
+static void names_set(const char *image, const char *name)
+{
+    char path[96], line[CONFIG_PATH_MAX + 160];
+    std::string out;
+    FILE *f;
+    names_path(path, sizeof(path));
+    f = fopen(path, "rb");
+    if (f)
+    {
+        while (fgets(line, sizeof(line), f))
+        {
+            char *bar;
+            line[strcspn(line, "\r\n")] = 0;
+            bar = strchr(line, '|');
+            if (!bar) continue;
+            *bar = 0;
+            if (_stricmp(line, image) != 0) out += std::string(line) + "|" + (bar + 1) + "\r\n";
+        }
+        fclose(f);
+    }
+    if (name[0]) out += std::string(image) + "|" + name + "\r\n";
+    f = fopen(path, "wb");
+    if (!f)
+    {
+        LOG_WARN("[menu] cannot write %s", path);
+        return;
+    }
+    fwrite(out.data(), 1, out.size(), f);
+    fclose(f);
+}
+
+static int rename_game(const char *image, const char *name)
+{
+    int i;
+    names_set(image, name);
+    for (i = 0; i < s_gameCount; i++)
+    {
+        GameEntry *g = &s_games[i];
+        if (_stricmp(g->path, image)) continue;
+        if (name[0])
+        {
+            copy_utf8(g->shown, sizeof(g->shown), name);
+            g->renamed = 1;
+        }
+        else
+            default_name(g);
+        LOG_INFO("[menu] %s: shown as \"%s\"", base_of(g->path), g->shown);
+    }
+    qsort(s_games, s_gameCount, sizeof(GameEntry), game_less);
+    for (i = 0; i < s_gameCount; i++)
+        if (!_stricmp(s_games[i].path, image)) return i;
+    return 0;
+}
+
 static char game_letter(const GameEntry *g)
 {
     const char *p = g->shown;
@@ -1677,11 +1808,10 @@ static void scan_games(const Config *c)
             read++;
         }
         if (g->infoOk && XbGameIdentity(g->path, &g->info)) read++;
-        if (g->infoOk) strncpy(g->shown, g->info.title, sizeof(g->shown) - 1);
-        else
-            game_display_name(base_of(g->path), g->shown, sizeof(g->shown));
+        default_name(g);
     }
     if (read) cache_save();
+    names_load();
     fav_load();
     qsort(s_games, s_gameCount, sizeof(GameEntry), game_less);
     LOG_INFO("[menu] %d game(s) in %s (%d header(s) read)", s_gameCount, c->gamesDir, read);
@@ -1832,7 +1962,7 @@ static void art_game(const GameEntry *g, ArtGame *a)
     if (g->infoOk)
     {
         strncpy(a->product, g->info.product, sizeof(a->product) - 1);
-        strncpy(a->title, g->info.title, sizeof(a->title) - 1);
+        strncpy(a->title, g->info.titleOdd ? g->shown : g->info.title, sizeof(a->title) - 1);
         strncpy(a->areas, g->info.areas, sizeof(a->areas) - 1);
     }
     else
@@ -1942,6 +2072,7 @@ static void card_draw(const GameEntry *g, const ArtView *v, int busy, float selA
     else
         UiText(UI_REGULAR, 18, ix, ty, UiAlpha(UI_COL_ACCENT_HI, a), Tr(T_NO_HEADER), UI_LEFT);
 
+    UiFooter(ix + iw - UiFooterWidth(Tr(T_FOOT_RENAME)), divY - 26, Tr(T_FOOT_RENAME));
     UiRect(ix, divY, iw, 1, UI_COL_LINE);
     detail(ix, divY + 22, 130, Tr(T_PRODUCT), g->infoOk ? g->info.product : "", 1.0f);
     detail(ix + 148, divY + 22, 90, Tr(T_VERSION), g->infoOk ? g->info.version : "", 1.0f);
@@ -2035,20 +2166,107 @@ static void art_bulk(void)
     free(all);
 }
 
+static void update_panel(IDirect3DDevice9 *dev, const char *title, const char *line, float f, const char *foot)
+{
+    const float w = 760, h = 250, x = (UI_WIDTH - w) / 2, y = (UI_HEIGHT - h) / 2, bx = x + 48, bw = w - 96;
+    begin_frame(dev, NULL, NULL);
+    UiDim();
+    UiPanel(x, y, w, h, 22);
+    UiText(UI_BOLD, 30, bx, y + 62, UI_COL_TEXT, title, UI_LEFT);
+    if (f >= 0.0f)
+    {
+        UiRoundRect(bx, y + 100, bw, 12, 6, D3DCOLOR_ARGB(40, 255, 255, 255), D3DCOLOR_ARGB(40, 255, 255, 255));
+        if (f > 0) UiRoundRect(bx, y + 100, bw * f < 12 ? 12 : bw * f, 12, 6, UI_COL_ACCENT_HI, UI_COL_ACCENT);
+    }
+    if (line) UiText(UI_REGULAR, 19, bx, y + 140, UI_COL_TEXT2, line, UI_LEFT);
+    UiText(UI_REGULAR, 17, bx, y + 172, UI_COL_TEXT3, Tr(T_UPDATE_KEEP), UI_LEFT);
+    if (foot) UiFooter(bx, y + h - 42, foot);
+    end_frame(dev);
+}
+
+static void update_offer(IDirect3DDevice9 *dev, const Config *c, const char *version)
+{
+    char ask[256], title[128], line[96];
+    UpdateProgress p;
+    UiInput in;
+    DWORD doneAt = 0;
+    _snprintf(ask, sizeof(ask) - 1, Tr(T_UPDATE_ASK), version, c->updateCheck >= 2 ? "0.0.0" : EMU_VERSION);
+    ask[sizeof(ask) - 1] = 0;
+    if (c->updateCheck != 3 && !ConfirmScreen(dev, ask, Tr(T_UPDATE_INSTALL), NULL, NULL))
+    {
+        LOG_INFO("[update] %s declined", version);
+        return;
+    }
+    LOG_INFO("[update] installing %s", version);
+    ArtPause(1);
+    UpdateInstallStart();
+    UiInputInit(&in);
+    for (;;)
+    {
+        WORD down = UiInputPoll(&in);
+        f32 f = -1.0f;
+        UpdateInstallState(&p);
+        line[0] = 0;
+        if (p.total) f = (f32)((double)p.done / (double)p.total);
+        switch (p.stage)
+        {
+        case UPDATE_DOWNLOAD:
+            _snprintf(title, sizeof(title) - 1, Tr(T_UPDATE_DOWNLOADING), version);
+            _snprintf(line, sizeof(line) - 1, Tr(T_UPDATE_MB), (u32)(p.done >> 20), (u32)(p.total >> 20));
+            if (down & XINPUT_GAMEPAD_B) UpdateInstallCancel();
+            break;
+        case UPDATE_VERIFY: strcpy(title, Tr(T_UPDATE_VERIFYING)); break;
+        case UPDATE_EXTRACT: strcpy(title, Tr(T_UPDATE_UNPACKING)); break;
+        case UPDATE_INSTALL: strcpy(title, Tr(T_UPDATE_INSTALLING)); f = -1.0f; break;
+        case UPDATE_DONE:
+            _snprintf(title, sizeof(title) - 1, Tr(T_UPDATE_DONE), version);
+            f = 1.0f;
+            if (!doneAt) doneAt = GetTickCount();
+            else if (GetTickCount() - doneAt > 2000)
+            {
+                xb_log_flush();
+                UpdateRestart();
+                doneAt = GetTickCount();
+            }
+            break;
+        case UPDATE_CANCELLED:
+            ArtPause(0);
+            return;
+        default:
+            strcpy(title, Tr(T_UPDATE_FAILED));
+            strncpy(line, p.error, sizeof(line) - 1);
+            line[sizeof(line) - 1] = 0;
+            f = -1.0f;
+            if (down & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B))
+            {
+                ArtPause(0);
+                return;
+            }
+            break;
+        }
+        title[sizeof(title) - 1] = 0;
+        line[sizeof(line) - 1] = 0;
+        update_panel(dev, title, line[0] ? line : NULL, f,
+                     p.stage == UPDATE_DOWNLOAD ? Tr(T_FOOT_CANCEL) : p.stage == UPDATE_FAILED ? Tr(T_FOOT_BACK) : NULL);
+    }
+}
+
 int GameList(IDirect3DDevice9 *dev, Config *c, char *path, int pathSize)
 {
     UiInput in;
-    int sel = 0, top = 0, i, lastSel = -1;
+    int sel = 0, top = 0, i, lastSel = -1, renaming = 0;
     float selAt = 0;
-    char all[CONFIG_PATH_MAX], msg[256];
+    char all[CONFIG_PATH_MAX], msg[256], renamePath[CONFIG_PATH_MAX];
     DWORD msgAt = 0;
+    static XOVERLAPPED kbOv;
+    static WCHAR kbText[160], kbTitle[96], kbDesc[160], kbOld[160];
     msg[0] = 0;
     scan_games(c);
     ArtStart();
     ArtSetNetwork(c->artDownload);
     ArtPause(0);
     if (c->artAll && s_gameCount) art_bulk();
-    if (c->updateCheck) UpdateCheckStart(c->updateCheck == 2 ? "0.0.0" : EMU_VERSION);
+    if (c->updateCheck) UpdateCheckStart(c->updateCheck >= 2 ? "0.0.0" : EMU_VERSION);
     for (i = 0; i < s_gameCount; i++)
         if (!_stricmp(s_games[i].path, c->lastGame)) sel = i;
     SettingsPaths(NULL, all, NULL, sizeof(all));
@@ -2059,11 +2277,50 @@ int GameList(IDirect3DDevice9 *dev, Config *c, char *path, int pathSize)
         int n = s_gameCount, na, nb, note;
         ArtStatus st;
         char newVersion[32];
-        if (UpdateCheckTake(newVersion, sizeof(newVersion)))
+        int installable;
+        if (renaming)
         {
-            _snprintf(msg, sizeof(msg) - 1, Tr(T_UPDATE_AVAILABLE), newVersion);
-            msg[sizeof(msg) - 1] = 0;
-            msgAt = GetTickCount();
+            down = 0;
+            if (XHasOverlappedIoCompleted(&kbOv))
+            {
+                DWORD r = XGetOverlappedResult(&kbOv, NULL, TRUE);
+                renaming = 0;
+                if (r == ERROR_SUCCESS)
+                {
+                    char name[256];
+                    int len;
+                    name[0] = 0;
+                    WideCharToMultiByte(CP_UTF8, 0, kbText, -1, name, sizeof(name) - 1, NULL, NULL);
+                    name[sizeof(name) - 1] = 0;
+                    len = (int)strlen(name);
+                    while (len > 0 && (name[len - 1] == ' ' || name[len - 1] == '|')) name[--len] = 0;
+                    for (i = 0; name[i]; i++)
+                        if (name[i] == '|') name[i] = ' ';
+                    sel = rename_game(renamePath, name[0] == ' ' ? name + strspn(name, " ") : name);
+                    strncpy(msg, Tr(name[0] ? T_RENAMED : T_NAME_RESET), sizeof(msg) - 1);
+                    msg[sizeof(msg) - 1] = 0;
+                    msgAt = GetTickCount();
+                    lastSel = -1;
+                }
+                else
+                    LOG_INFO("[menu] keyboard closed without a name (%lu)", r);
+                UiInputInit(&in);
+            }
+        }
+        if (UpdateCheckTake(newVersion, sizeof(newVersion), &installable))
+        {
+            if (installable && !renaming)
+            {
+                update_offer(dev, c, newVersion);
+                UiInputInit(&in);
+                lastSel = -1;
+            }
+            else
+            {
+                _snprintf(msg, sizeof(msg) - 1, Tr(T_UPDATE_AVAILABLE), newVersion);
+                msg[sizeof(msg) - 1] = 0;
+                msgAt = GetTickCount();
+            }
         }
         note = ArtTakeNote(&na, &nb);
         if (note >= 0)
@@ -2090,6 +2347,24 @@ int GameList(IDirect3DDevice9 *dev, Config *c, char *path, int pathSize)
                 sel = letter_jump(sel, (down & UI_BTN_RT) ? 1 : -1);
                 s_jumpLetter = game_letter(&s_games[sel]);
                 s_jumpAt = UiTime();
+            }
+            if (down & XINPUT_GAMEPAD_RIGHT_THUMB)
+            {
+                DWORD r;
+                memset(&kbOv, 0, sizeof(kbOv));
+                memset(kbText, 0, sizeof(kbText));
+                MultiByteToWideChar(CP_UTF8, 0, s_games[sel].shown, -1, kbOld, 159);
+                MultiByteToWideChar(CP_UTF8, 0, Tr(T_RENAME_TITLE), -1, kbTitle, 95);
+                MultiByteToWideChar(CP_UTF8, 0, Tr(T_RENAME_DESC), -1, kbDesc, 159);
+                r = XShowKeyboardUI(0, VKBD_DEFAULT, kbOld, kbTitle, kbDesc, kbText, 64, &kbOv);
+                if (r == ERROR_IO_PENDING)
+                {
+                    strncpy(renamePath, s_games[sel].path, sizeof(renamePath) - 1);
+                    renamePath[sizeof(renamePath) - 1] = 0;
+                    renaming = 1;
+                }
+                else
+                    LOG_WARN("[menu] the keyboard did not open (%lu)", r);
             }
             if (down & XINPUT_GAMEPAD_B)
             {

@@ -1,5 +1,43 @@
 # Changes
 
+## 0.4.0 (2026-11-26)
+
+**New**
+
+- **True 16:9** (**Settings > Picture > Aspect ratio**):
+  - **16:9**: for about 150 games (and the Atomiswave conversions of Knights of Valour and Faster than Speed), HarissaDC changes the game's own camera, so it shows a wider view at the TV's full resolution (1280x720). The game's 2D overlay (score, timer, menus) is stretched to 16:9. Other games are shown 4:3, with the sides filled by a blurred copy of the picture instead of black bars (**Sides**: Blurred or Black).
+  - **16:9 wider view**: for any 3D game, shows what the game draws beyond its 4:3 edges. When a game leaves its sides empty, the picture goes back to 4:3 by itself.
+  - **16:9 anamorphic**: for games that have their own 16:9 option (Wacky Races, Toy Commander...).
+  - The choice can be made for one game only, like every setting.
+- **Automatic updates**: when HarissaDC starts and a newer release is out, it offers to download and install it (A: Install, B: Not now). Only the emulator and the cheat database are replaced: your save states, memory cards, settings, games and box art are kept. This works from this version on, for the releases that follow.
+- **Rename games** in the game list (RS), for example discs whose title shows up garbled.
+- **Games as their own dashboard entries**: a shortcut folder with `datadir=` and `exitto=dashboard` in its `harissadc.ini` uses the main install's saves, settings and BIOS, and quits back to the dashboard (#39).
+- **CD audio in real time** (**Settings > Advanced > CD audio**), for games whose CD music must keep its own pace.
+- **Fewer frames when slow** (**Settings > Advanced**): when a game falls behind, it keeps its real speed and shows fewer pictures, instead of running in slow motion. It is on by default for the games that need it (all Windows CE games, Wacky Races, Draconus).
+
+**Faster**
+
+- **Windows CE games** now run at their real speed: **Urban Chaos** about 59 fps (30 before), **Tomb Raider: The Last Revelation** 59.5 (40), **Spirit of Speed 1937** about 56 (32), **Sega Rally 2**'s races and **Resident Evil 2** at 60 most of the time. They show fewer distinct pictures in their heaviest scenes.
+- **Wacky Races**: its hub and races at 60 fps (41 to 50 before).
+- **Alone in the Dark: The New Nightmare**: about 54 fps in play (45 before).
+
+**Fixed**
+
+- **Dragon Riders**: the notes were drawn on white boxes (#40).
+- **Sonic Adventure 2**: sound effects that kept repeating, and dark lines under Sonic's feet when he falls.
+- **Alone in the Dark**: sounds that looped.
+- **Toy Commander** and **Re-Volt**: no music when started with Sega's BIOS (#45).
+- **Sound**: after a slowdown, the sound no longer speeds up for a long time or cuts in small slices (#43).
+- **Headhunter**: noise in the city sky (#49).
+- **Spirit of Speed 1937**: the title, loading and pause screens (#47).
+- **DX Game of Life**: its menus were drawn in a quarter of the screen.
+- **Box art**: the main thumbnail server lost every Dreamcast picture; HarissaDC now uses its GitHub copy (#44), and the Atomiswave conversions and more games (`.7z` and `.zip` ones before their first start) now get their cover.
+
+**Known issues**
+
+- **Army Men: Sarge's Heroes**: its videos may freeze (#42).
+- Unreal Tournament and Dragon Riders stay below 60 fps in their heaviest scenes.
+
 ## 0.3.0 (2026-11-20)
 
 **Warning about achievements**: HarissaDC gives its own Xbox 360 achievements, written to

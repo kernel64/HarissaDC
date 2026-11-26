@@ -21,6 +21,9 @@
 #define RT_H 720
 #define EDRAM_RT 720
 #define EDRAM_DEPTH 1350
+#define RT_WIDE_W 1280
+#define EDRAM_WIDE_RT 0
+#define EDRAM_WIDE_DEPTH 720
 
 #define BATCH_VERTICES 3000
 #define TEX_SLOTS 4096
@@ -60,6 +63,8 @@ struct FrameSlot
     u32 vramOff, vramBytes, stamp;
     int w, h;
     f32 scale;
+    f32 viewU0, viewU1;
+    int view43;
     u32 lastUse;
     IDirect3DTexture9 *tex;
     int taW, taH;
@@ -77,6 +82,7 @@ struct Retired
 
 static IDirect3DDevice9 *s_dev;
 static IDirect3DSurface9 *s_rt, *s_depth, *s_back;
+static IDirect3DSurface9 *s_rtWide, *s_depthWide;
 static IDirect3DVertexDeclaration9 *s_decl;
 static IDirect3DVertexShader9 *s_vs;
 static IDirect3DPixelShader9 *s_ps[2048];
@@ -136,6 +142,13 @@ static EMU_INLINE f32 depth_of(f32 z)
 static int s_rtW, s_rtH;
 static f32 s_xScale, s_yScale;
 static f32 s_xOff;
+static int s_taW;
+static IDirect3DQuery9 *s_sideQuery;
+static int s_sideQueryBusy, s_sideEmptyRun, s_sideFullRun, s_sideCrop;
+static u32 s_sidePixels;
+#define SIDE_EMPTY_PCT 2
+#define SIDE_CROP_AFTER 20
+#define SIDE_FULL_AFTER 180
 static f32 s_pullU, s_pullV, s_midU, s_midV;
 
 struct RenderJob
@@ -145,6 +158,7 @@ struct RenderJob
     u32 regs[PVR_REG_WORDS];
     u32 palGen;
     int region[4];
+    u32 passSorted;
 };
 static RenderJob s_job;
 static HANDLE s_jobSem, s_jobDone;
@@ -525,7 +539,7 @@ static IDirect3DTexture9 *get_texture_inner(u32 tcw, u32 tsp)
 {
     u64 t0, t1;
     u32 sizeBits = tsp & 0x3F, w = 8u << ((tsp >> 3) & 7), h = 8u << (tsp & 7);
-    u32 fmt = (tcw >> 27) & 7, palGen, hash, i, y;
+    u32 fmt = (tcw >> 27) & 7, palGen, hash, i, y, stamp;
     int indexed = g_xb_pal_shader && fmt >= 5;
     u32 strideWidth = (jreg(0x005F80E4) & 31) * 32;
     TexEntry *e = NULL;
@@ -566,6 +580,8 @@ static IDirect3DTexture9 *get_texture_inner(u32 tcw, u32 tsp)
     }
     else if (fmt >= 5)
         for (i = 0; i < 1024; i++) s_palette[i] = jreg(0x005F9000 + i * 4);
+    stamp = vram_cache_stamp();
+    __lwsync();
     t0 = prof_ticks();
     {
         const u32 *src = NULL;
@@ -588,7 +604,7 @@ static IDirect3DTexture9 *get_texture_inner(u32 tcw, u32 tsp)
                 s_texDecodes++;
                 s_texDecodeTicks += t1 - t0;
                 s_texUploadTicks += prof_ticks() - t1;
-                e->stamp = vram_cache_stamp();
+                e->stamp = stamp;
                 return e->tex;
             }
         }
@@ -637,7 +653,7 @@ static IDirect3DTexture9 *get_texture_inner(u32 tcw, u32 tsp)
     e->palGen = palGen;
     e->vramOff = (tcw & 0x1FFFFF) << 3;
     e->vramBytes = texture_bytes(tcw, w, h, strideWidth);
-    e->stamp = vram_cache_stamp();
+    e->stamp = stamp;
     e->bytes = w * h * 4;
     s_texBytes += e->bytes;
     s_texCount++;
@@ -675,6 +691,44 @@ static void draw_batch(void)
         s_dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, s_batchN / 3, s_batch, sizeof(XVtx));
 }
 
+static XVtx *s_volVtx;
+static u32 s_volN, s_volCap;
+static int s_volBuilding, s_volOk;
+
+static void draw_batch(void);
+
+static void vol_keep(void)
+{
+    if (s_volN + s_batchN > s_volCap)
+    {
+        u32 cap = (s_volN + s_batchN) * 2 + 1024;
+        XVtx *p = (XVtx *)realloc(s_volVtx, cap * sizeof(XVtx));
+        if (!p)
+        {
+            draw_batch();
+            s_volOk = 0;
+            return;
+        }
+        s_volVtx = p;
+        s_volCap = cap;
+    }
+    memcpy(&s_volVtx[s_volN], s_batch, s_batchN * sizeof(XVtx));
+    s_volN += s_batchN;
+}
+
+static void vol_draw(u32 from, u32 n)
+{
+    while (n >= 3)
+    {
+        u32 c = n > BATCH_VERTICES ? BATCH_VERTICES : n - n % 3;
+        s_dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, c / 3, &s_volVtx[from], sizeof(XVtx));
+        s_rCalls++;
+        s_rVerts += c;
+        from += c;
+        n -= c;
+    }
+}
+
 static void flush(void)
 {
     if (s_exactDepth)
@@ -691,6 +745,13 @@ static void flush(void)
             }
         else
             for (i = 0; i + 2 < s_batchN; i += 3) set_plane(&s_batch[i], &s_raw[i]);
+    }
+    if (s_volBuilding)
+    {
+        if (s_batchN >= 3) vol_keep();
+        s_batchN = 0;
+        s_idxN = 0;
+        return;
     }
     if (s_batchN >= 3)
     {
@@ -751,6 +812,8 @@ static u32 uv_inside(const TaStrip *s)
 
 static int s_modVols;
 static int s_transAutosort;
+static int s_passSorted;
+static u32 s_pass;
 static int s_depthPass;
 
 struct RsEntry
@@ -826,6 +889,11 @@ static void set_clip(u32 clip)
         r.right = (LONG)((x1 * s_xScale - s_xOff + 1.0f) * 0.5f * s_rtW + 0.5f);
         r.top = (LONG)(y0 * s_yScale * 0.5f * s_rtH + 0.5f);
         r.bottom = (LONG)(y1 * s_yScale * 0.5f * s_rtH + 0.5f);
+        if (s_xOff < 1.0f)
+        {
+            if (TA_CLIP_X0(clip) == 0) r.left = 0;
+            if (x1 >= (f32)s_taW) r.right = s_rtW;
+        }
         if (r.left < 0) r.left = 0;
         if (r.top < 0) r.top = 0;
         if (r.right > s_rtW) r.right = s_rtW;
@@ -934,7 +1002,7 @@ static void apply_state(const TaStrip *s, u32 inside)
         s_pullU = s_pullV = 0.0f;
     {
         u32 zmode = isp >> 29;
-        if (list == TA_LIST_PUNCH || (list == TA_LIST_TRANS && !(jreg(0x005F8098) & 1))) zmode = 6;
+        if (list == TA_LIST_PUNCH || (list == TA_LIST_TRANS && s_passSorted)) zmode = 6;
         rs(D3DRS_ZFUNC, s_zfunc[zmode]);
     }
     rs(D3DRS_ZWRITEENABLE, !((isp >> 26) & 1) && !(list == TA_LIST_TRANS && s_transAutosort));
@@ -991,6 +1059,44 @@ static EMU_INLINE void put_vertex(XVtx *o, const TaVertex *v, const TaVertex *co
     }
 }
 
+static void put_vertices(XVtx *o, const TaVertex *v, u32 n)
+{
+    const f32 xs = s_xScale, xo = s_xOff, ys = s_yScale, ds = s_depthScale, um = s_uMul, vm = s_vMul;
+    u32 k;
+    for (k = 0; k + 1 < n; k += 2)
+    {
+        const TaVertex *a = &v[k], *b = &v[k + 1];
+        XVtx *p = &o[k], *q = &o[k + 1];
+        f32 za = a->z > 1e-9f ? (a->z < 1e6f ? a->z : 1e6f) : 1e-9f;
+        f32 zb = b->z > 1e-9f ? (b->z < 1e6f ? b->z : 1e6f) : 1e-9f;
+        f32 wa = 1.0f / za, wb = 1.0f / zb;
+        f32 da = za * ds < 1.0f ? za * ds : 1.0f, db = zb * ds < 1.0f ? zb * ds : 1.0f;
+        f32 xa = (a->x * xs - xo) * wa, xb = (b->x * xs - xo) * wb;
+        f32 ya = (1.0f - a->y * ys) * wa, yb = (1.0f - b->y * ys) * wb;
+        f32 ua = a->u * um, ub = b->u * um, va = a->v * vm, vb = b->v * vm;
+        u32 ca = a->base, cb = b->base, fa = a->offset, fb = b->offset;
+        p->x = xa;
+        q->x = xb;
+        p->y = ya;
+        q->y = yb;
+        p->z = da * wa;
+        q->z = db * wb;
+        p->w = wa;
+        q->w = wb;
+        p->base = ca;
+        q->base = cb;
+        p->offs = fa;
+        q->offs = fb;
+        p->u = ua;
+        q->u = ub;
+        p->v = va;
+        q->v = vb;
+        p->fogW = wa;
+        q->fogW = wb;
+    }
+    if (k < n) put_vertex(&o[k], &v[k], &v[k]);
+}
+
 static void draw_strip_tri(const TaStrip *s, u32 k)
 {
     u32 cull = (s->isp >> 27) & 3, gouraud = (s->pcw >> 1) & 1;
@@ -1017,7 +1123,13 @@ static void draw_strip(const TaStrip *s)
 {
     u32 k, n = s->count, base, idx0, cull = (s->isp >> 27) & 3;
     const TaVertex *v = &s_scene.verts[s->first];
-    if (!((s->pcw >> 1) & 1) || n > BATCH_VERTICES || s_exactDepth)
+    int flat = !((s->pcw >> 1) & 1);
+    if (flat && n <= BATCH_VERTICES && !s_exactDepth && s_pullU == 0.0f)
+    {
+        for (k = 1; k < n && v[k].base == v[0].base && v[k].offset == v[0].offset; k++) {}
+        flat = k < n;
+    }
+    if (flat || n > BATCH_VERTICES || s_exactDepth)
     {
         for (k = 0; k + 2 < n; k++) draw_strip_tri(s, k);
         return;
@@ -1035,7 +1147,9 @@ static void draw_strip(const TaStrip *s)
         s_midU = su / (f32)n;
         s_midV = sv / (f32)n;
     }
-    for (k = 0; k < n; k++) put_vertex(&s_batch[base + k], &v[k], &v[k]);
+    if (s_pullU == 0.0f && !s_exactDepth && !s_depthHuge) put_vertices(&s_batch[base], v, n);
+    else
+        for (k = 0; k < n; k++) put_vertex(&s_batch[base + k], &v[k], &v[k]);
     s_batchN += n;
     idx0 = s_idxN;
     for (k = 0; k + 2 < n; k++)
@@ -1113,6 +1227,35 @@ static void sort_tri_keys(TriKey *keys, u32 n)
     memcpy(keys, tmp, n * sizeof(TriKey));
 }
 
+static u32 *s_listIdx[5], s_listN[5], s_listCap;
+
+static int list_index_build(void)
+{
+    u32 i, n = s_scene.stripCount;
+    if (s_listCap < n)
+    {
+        u32 k, cap = n + 1024;
+        for (k = 0; k < 5; k++)
+        {
+            free(s_listIdx[k]);
+            s_listIdx[k] = (u32 *)malloc(cap * sizeof(u32));
+        }
+        s_listCap = cap;
+        for (k = 0; k < 5; k++)
+            if (!s_listIdx[k]) s_listCap = 0;
+        if (!s_listCap) return 0;
+    }
+    memset(s_listN, 0, sizeof(s_listN));
+    for (i = 0; i < n; i++)
+    {
+        const TaStrip *s = &s_scene.strips[i];
+        __dcbt(8 * sizeof(TaStrip), s);
+        if (s->pass != s_pass || s->count < 3 || s->list > 4) continue;
+        s_listIdx[s->list][s_listN[s->list]++] = i;
+    }
+    return 1;
+}
+
 static void draw_list_sorted(u32 list)
 {
     state_cache_reset();
@@ -1122,7 +1265,7 @@ static void draw_list_sorted(u32 list)
     static u8 *insideOf;
     static u32 insideCap;
     const TaStrip *prev = NULL;
-    u32 i, n = 0, prevInside = 0, prevStrip = ~0u, inside = 0;
+    u32 i, j, n = 0, prevInside = 0, prevStrip = ~0u, inside = 0;
     if (keyCap < s_scene.vertCount)
     {
         free(keys);
@@ -1145,12 +1288,12 @@ static void draw_list_sorted(u32 list)
             return;
         }
     }
-    for (i = 0; i < s_scene.stripCount; i++)
+    for (j = 0; j < s_listN[list]; j++)
     {
+        u32 i = s_listIdx[list][j];
         const TaStrip *s = &s_scene.strips[i];
         const TaVertex *v = &s_scene.verts[s->first];
         u32 k;
-        if (s->list != list || s->count < 3) continue;
         insideOf[i] = (u8)((s->pcw >> 3) & 1 ? uv_inside(s) : 0);
         for (k = 0; k + 2 < s->count; k++)
         {
@@ -1174,10 +1317,11 @@ static void draw_list_sorted(u32 list)
     s_rtTris += n;
     s_dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
     s_depthPass = 1;
-    for (i = 0; g_xb_trans_depth && i < s_scene.stripCount; i++)
+    for (j = 0; g_xb_trans_depth && j < s_listN[list]; j++)
     {
+        u32 i = s_listIdx[list][j];
         const TaStrip *s = &s_scene.strips[i];
-        if (s->list != list || s->count < 3 || !ta_strip_can_cover(&s_scene, s)) continue;
+        if (!ta_strip_can_cover(&s_scene, s)) continue;
         inside = insideOf[i];
         if (!prev || !same_state(prev, s) || inside != prevInside)
         {
@@ -1219,21 +1363,20 @@ static void draw_list(u32 list)
 {
     state_cache_reset();
     const TaStrip *prev = NULL;
-    u32 i, prevInside = 0;
+    u32 j, prevInside = 0;
     if (list == TA_LIST_TRANS && s_transAutosort)
     {
         draw_list_sorted(list);
         return;
     }
-    for (i = 0; i < s_scene.stripCount; i++)
+    for (j = 0; j < s_listN[list]; j++)
     {
-        const TaStrip *s = &s_scene.strips[i];
+        const TaStrip *s = &s_scene.strips[s_listIdx[list][j]];
         u32 inside;
-        __dcbt(8 * sizeof(TaStrip), s);
-        if (s->list != list || s->count < 3) continue;
-        if (i + 1 < s_scene.stripCount)
+        if (j + 4 < s_listN[list]) __dcbt(0, &s_scene.strips[s_listIdx[list][j + 4]]);
+        if (j + 1 < s_listN[list])
         {
-            const TaVertex *nv = &s_scene.verts[s[1].first];
+            const TaVertex *nv = &s_scene.verts[s_scene.strips[s_listIdx[list][j + 1]].first];
             __dcbt(0, nv);
             __dcbt(128, nv);
         }
@@ -1299,21 +1442,96 @@ static u32 clip_mod_tri(const TaModTri *t, f64 out[9][3])
     return n;
 }
 
+static int vol_tri(const TaModTri *t)
+{
+    XVtx *o;
+    f32 x0 = t->x[0], x1 = t->x[1], x2 = t->x[2], y0 = t->y[0], y1 = t->y[1], y2 = t->y[2];
+    f32 r0 = t->z[0], r1 = t->z[1], r2 = t->z[2];
+    f32 xs = s_xScale, xo = s_xOff, ys = s_yScale, ds = s_depthScale;
+    f32 z0, z1, z2, w0, w1, w2, d0, d1, d2, p0, p1, p2;
+    if (s_volN + 3 > s_volCap)
+    {
+        u32 cap = s_volN * 2 + 1024;
+        XVtx *p = (XVtx *)realloc(s_volVtx, cap * sizeof(XVtx));
+        if (!p) return 0;
+        s_volVtx = p;
+        s_volCap = cap;
+    }
+    z0 = (f32)__fsel(r0 - 1e-9f, __fsel(1e6f - r0, r0, 1e6f), 1e-9f);
+    z1 = (f32)__fsel(r1 - 1e-9f, __fsel(1e6f - r1, r1, 1e6f), 1e-9f);
+    z2 = (f32)__fsel(r2 - 1e-9f, __fsel(1e6f - r2, r2, 1e6f), 1e-9f);
+    w0 = 1.0f / z0;
+    w1 = 1.0f / z1;
+    w2 = 1.0f / z2;
+    p0 = r0 * ds;
+    p1 = r1 * ds;
+    p2 = r2 * ds;
+    p0 = (f32)__fsel(1.0f - p0, p0, 1.0f);
+    p1 = (f32)__fsel(1.0f - p1, p1, 1.0f);
+    p2 = (f32)__fsel(1.0f - p2, p2, 1.0f);
+    d0 = z0 * ds;
+    d1 = z1 * ds;
+    d2 = z2 * ds;
+    o = &s_volVtx[s_volN];
+    o[0].x = (x0 * xs - xo) * w0;
+    o[1].x = (x1 * xs - xo) * w1;
+    o[2].x = (x2 * xs - xo) * w2;
+    o[0].y = (1.0f - y0 * ys) * w0;
+    o[1].y = (1.0f - y1 * ys) * w1;
+    o[2].y = (1.0f - y2 * ys) * w2;
+    o[0].z = p0 * w0;
+    o[1].z = p1 * w1;
+    o[2].z = p2 * w2;
+    o[0].w = o[0].fogW = w0;
+    o[1].w = o[1].fogW = w1;
+    o[2].w = o[2].fogW = w2;
+    o[0].base = o[1].base = o[2].base = 0;
+    o[0].offs = o[1].offs = o[2].offs = 0;
+    o[0].u = o[1].u = o[2].u = 0.0f;
+    o[0].v = o[1].v = o[2].v = 0.0f;
+    if (s_exactDepth)
+    {
+        f64 ex1 = (f64)x1 - x0, ey1 = (f64)y1 - y0, ed1 = (f64)d1 - d0;
+        f64 ex2 = (f64)x2 - x0, ey2 = (f64)y2 - y0, ed2 = (f64)d2 - d0;
+        f64 det = ex1 * ey2 - ex2 * ey1, a = 0, b = 0, c;
+        u32 k;
+        if (det != 0)
+        {
+            a = (ed1 * ey2 - ed2 * ey1) / det;
+            b = (ex1 * ed2 - ex2 * ed1) / det;
+        }
+        c = (f64)d0 - a * x0 - b * y0;
+        for (k = 0; k < 3; k++)
+        {
+            o[k].plane[0] = (f32)a;
+            o[k].plane[1] = (f32)b;
+            o[k].plane[2] = (f32)c;
+        }
+    }
+    s_volN += 3;
+    return 1;
+}
+
 static void mod_tris(u32 first, u32 count, u32 cull)
 {
     u32 k;
+    const f64 limX0 = -MOD_CLIP_MARGIN, limX1 = s_modW + MOD_CLIP_MARGIN, limY0 = -MOD_CLIP_MARGIN, limY1 = s_modH + MOD_CLIP_MARGIN;
+    const int direct = s_volBuilding && !s_depthHuge;
     for (k = 0; k < count; k++)
     {
         const TaModTri *t = &s_scene.modTris[first + k];
-        f32 area = (t->x[1] - t->x[0]) * (t->y[2] - t->y[0]) - (t->x[2] - t->x[0]) * (t->y[1] - t->y[0]);
+        f64 area = ((f64)t->x[1] - t->x[0]) * ((f64)t->y[2] - t->y[0]) - ((f64)t->x[2] - t->x[0]) * ((f64)t->y[1] - t->y[0]);
         TaVertex v[3];
         u32 i;
         if (area == 0 || (cull == 2 && area < 0) || (cull == 3 && area > 0)) continue;
-        memset(v, 0, sizeof(v));
         for (i = 0; i < 3; i++)
-            if (t->x[i] < -MOD_CLIP_MARGIN || t->x[i] > s_modW + MOD_CLIP_MARGIN || t->y[i] < -MOD_CLIP_MARGIN ||
-                t->y[i] > s_modH + MOD_CLIP_MARGIN)
-                break;
+            if (t->x[i] < limX0 || t->x[i] > limX1 || t->y[i] < limY0 || t->y[i] > limY1) break;
+        if (i == 3 && direct)
+        {
+            if (s_batchN) flush();
+            if (vol_tri(t)) continue;
+        }
+        memset(v, 0, sizeof(v));
         if (i < 3)
         {
             f64 c[9][3];
@@ -1348,7 +1566,7 @@ static void mod_tris(u32 first, u32 count, u32 cull)
 
 static void draw_mod_volumes(int w, int h)
 {
-    u32 i, base = ~0u, scale = jreg(0x005F8074) & 0xFF;
+    u32 i, base = ~0u, scale = jreg(0x005F8074) & 0xFF, volCull = 0;
     int exactBefore = s_exactDepth;
     TaVertex q[4];
     XVtx *o;
@@ -1365,8 +1583,15 @@ static void draw_mod_volumes(int w, int h)
     {
         const TaModVol *m = &s_scene.modVols[i];
         u32 mode = m->isp >> 29, cull = (m->isp >> 27) & 3;
-        if (m->list != TA_LIST_OPAQUE_MOD || !m->count) continue;
-        if (base == ~0u) base = m->first;
+        if (m->list != TA_LIST_OPAQUE_MOD || m->pass != s_pass || !m->count) continue;
+        if (base == ~0u)
+        {
+            base = m->first;
+            s_volN = 0;
+            s_volOk = 1;
+            volCull = cull;
+        }
+        if (cull != volCull) s_volOk = 0;
         s_dev->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
         s_dev->SetRenderState(D3DRS_ZFUNC, D3DCMP_GREATER);
         s_dev->SetRenderState(D3DRS_STENCILWRITEMASK, 2);
@@ -1380,7 +1605,13 @@ static void draw_mod_volumes(int w, int h)
         }
         else
             s_dev->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_INVERT);
-        mod_tris(m->first, m->count, cull);
+        {
+            u32 from = s_volN;
+            s_volBuilding = 1;
+            mod_tris(m->first, m->count, cull);
+            s_volBuilding = 0;
+            vol_draw(from, s_volN - from);
+        }
         if (mode == 1 || mode == 2)
         {
             s_dev->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
@@ -1390,7 +1621,8 @@ static void draw_mod_volumes(int w, int h)
             s_dev->SetRenderState(D3DRS_STENCILREF, 1);
             s_dev->SetRenderState(D3DRS_STENCILPASS, mode == 1 ? D3DSTENCILOP_REPLACE : D3DSTENCILOP_KEEP);
             s_dev->SetRenderState(D3DRS_STENCILFAIL, D3DSTENCILOP_ZERO);
-            mod_tris(base, m->first + m->count - base, cull);
+            if (s_volOk) vol_draw(0, s_volN);
+            else mod_tris(base, m->first + m->count - base, cull);
             s_dev->SetRenderState(D3DRS_STENCILMASK, 0xFF);
             base = ~0u;
         }
@@ -1407,8 +1639,9 @@ static void draw_mod_volumes(int w, int h)
     s_dev->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_ZERO);
     s_dev->SetRenderState(D3DRS_STENCILFAIL, D3DSTENCILOP_ZERO);
     memset(q, 0, sizeof(q));
-    q[0].x = q[2].x = g_xb_widescreen ? -(f32)w / 6 : 0.0f;
-    q[1].x = q[3].x = g_xb_widescreen ? (f32)w * 7 / 6 : (f32)w;
+    (void)w;
+    q[0].x = q[2].x = (s_xOff - 1.0f) / s_xScale;
+    q[1].x = q[3].x = (s_xOff + 1.0f) / s_xScale;
     q[2].y = q[3].y = (f32)h;
     for (i = 0; i < 4; i++)
     {
@@ -1621,12 +1854,79 @@ static void rtt_finish(u32 addr, int w, int h, u32 stride)
     slot->stamp = vram_cache_stamp();
 }
 
+static void side_query(int w, int h, int rtW, int rtH)
+{
+    XVtx q[12];
+    f32 l = (0.0f * s_xScale - s_xOff), r = ((f32)w * s_xScale - s_xOff), z = depth_of(s_scene.bgDepth);
+    int k, side;
+    (void)h;
+    if (l <= -1.0f || r >= 1.0f) return;
+    memset(q, 0, sizeof(q));
+    for (side = 0; side < 2; side++)
+    {
+        f32 x0 = side ? r : -1.0f, x1 = side ? 1.0f : l;
+        static const int corner[6] = { 0, 1, 2, 2, 1, 3 };
+        for (k = 0; k < 6; k++)
+        {
+            XVtx *v = &q[side * 6 + k];
+            v->x = (corner[k] & 1) ? x1 : x0;
+            v->y = (corner[k] & 2) ? -1.0f : 1.0f;
+            v->z = z;
+            v->w = 1.0f;
+            v->fogW = 1.0f;
+        }
+    }
+    s_sidePixels = (u32)((f32)rtW * (l + 1.0f) * 0.5f + 0.5f) * (u32)rtH + (u32)((f32)rtW * (1.0f - r) * 0.5f + 0.5f) * (u32)rtH;
+    s_dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+    s_scissor = ~0u;
+    s_dev->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+    s_dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+    s_dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    s_dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+    s_dev->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
+    s_dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+    s_dev->SetRenderState(D3DRS_ZFUNC, D3DCMP_GREATEREQUAL);
+    s_dev->SetTexture(0, NULL);
+    s_dev->SetPixelShader(pixel_shader(0x20 | (2 << 6)));
+    s_sideQuery->Issue(D3DISSUE_BEGIN);
+    s_dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 4, q, sizeof(XVtx));
+    s_sideQuery->Issue(D3DISSUE_END);
+    s_sideQueryBusy = 1;
+    s_dev->SetRenderState(D3DRS_COLORWRITEENABLE, D3DCOLORWRITEENABLE_ALL);
+    state_cache_reset();
+}
+
+static int movie_frame(f32 w, f32 h)
+{
+    u32 i;
+    for (i = 0; i < s_scene.stripCount; i++)
+    {
+        const TaStrip *st = &s_scene.strips[i];
+        const TaVertex *v = s_scene.verts + st->first;
+        f32 x0, x1, y0, y1;
+        u32 k;
+        if (!((st->pcw >> 3) & 1) || ((st->tcw >> 27) & 7) != 3 || !st->count) continue;
+        x0 = x1 = v[0].x;
+        y0 = y1 = v[0].y;
+        for (k = 1; k < st->count; k++)
+        {
+            if (v[k].x < x0) x0 = v[k].x;
+            if (v[k].x > x1) x1 = v[k].x;
+            if (v[k].y < y0) y0 = v[k].y;
+            if (v[k].y > y1) y1 = v[k].y;
+        }
+        if ((x1 - x0) * (y1 - y0) >= 0.6f * w * h) return 1;
+    }
+    return 0;
+}
+
 static void render_frame(void)
 {
-    u32 words = s_job.words, i;
+    u32 words = s_job.words, i, passes;
     const u32 *data = s_job.ta;
     int w, h, outW, rtW, rtH, hscale;
-    f32 scale, maxZ, wide;
+    f32 scale, maxZ, wide, reveal;
+    int wideRt, view43 = 0;
     u32 addr = jreg(0x005F8060) & 0x7FFFFFu, stride = (jreg(0x005F804C) & 0x1FF) * 8;
     int rtt = (jreg(0x005F8060) >> 24) & 1;
     u64 t0;
@@ -1642,11 +1942,15 @@ static void render_frame(void)
     cy1 = h;
     if (!rtt && !s_testMode)
     {
+        u32 rsize = jreg(0x005F805C), depth = (jreg(0x005F8044) >> 2) & 3;
+        int dispW = (int)(((rsize & 0x3FF) + 1) * 4 / (depth == 2 ? 3 : depth == 3 ? 4 : 2));
+        int dispH = (int)(((rsize >> 10) & 0x3FF) + 1) * ((jreg(0x005F80D0) >> 4) & 1 ? 2 : 1);
         for (i = 0; i < FRAME_SLOTS; i++)
             if (s_frames[i].tex && s_frames[i].addr == addr && s_frames[i].vramBytes)
             {
-                if (h * 3 <= s_frames[i].taH * 2) h = s_frames[i].taH;
-                if (w * 3 <= s_frames[i].taW * 2)
+                int oldOutW = hscale ? s_frames[i].taW / 2 : s_frames[i].taW;
+                if (h * 3 <= s_frames[i].taH * 2 && dispH * 3 >= s_frames[i].taH * 2) h = s_frames[i].taH;
+                if (w * 3 <= s_frames[i].taW * 2 && dispW * 3 >= oldOutW * 2)
                 {
                     w = s_frames[i].taW;
                     outW = hscale ? w / 2 : w;
@@ -1672,21 +1976,26 @@ static void render_frame(void)
     s_rFrames++;
 
     wide = g_xb_widescreen ? 4.0f / 3.0f : 1.0f;
-    scale = (f32)RT_W / (outW * wide);
+    reveal = g_xb_widescreen == WIDE_REVEAL ? wide : 1.0f;
+    wideRt = g_xb_widescreen && s_rtWide && !g_xb_render_1x && !s_testMode && !rtt;
+    scale = (f32)(wideRt ? RT_WIDE_W : RT_W) / (outW * wide);
     if ((f32)RT_H / h < scale) scale = (f32)RT_H / h;
     if (g_xb_render_1x && scale > 1.0f) scale = 1.0f;
     if (s_testMode || rtt)
     {
-        wide = 1.0f;
+        wide = s_testMode && !rtt && g_xb_widescreen == WIDE_REVEAL ? (f32)(outW + 2 * 128) / (f32)outW : 1.0f;
+        reveal = wide;
         scale = 1.0f;
     }
     rtW = (int)(outW * wide * scale + 0.5f);
     rtH = (int)(h * scale + 0.5f);
     s_rtW = rtW;
     s_rtH = rtH;
-    s_xScale = 2.0f / (w * wide);
-    s_xOff = 1.0f / wide;
+    s_xScale = 2.0f / (w * reveal);
+    s_xOff = 1.0f / reveal;
     s_yScale = 2.0f / h;
+    s_taW = w;
+    if (reveal > 1.0f && !s_testMode && !rtt) ta_scene_widen_full_screen(&s_scene, (f32)w, (f32)h, (s_xOff - 1.0f) / s_xScale, (s_xOff + 1.0f) / s_xScale);
     maxZ = s_scene.zMax > s_scene.bgDepth ? s_scene.zMax : s_scene.bgDepth;
     if (g_xb_mod_vols)
     {
@@ -1732,8 +2041,8 @@ static void render_frame(void)
     }
 
     s_dev->GetRenderState(D3DRS_HALFPIXELOFFSET, &halfPixel);
-    s_dev->SetRenderTarget(0, s_rt);
-    s_dev->SetDepthStencilSurface(s_depth);
+    s_dev->SetRenderTarget(0, wideRt ? s_rtWide : s_rt);
+    s_dev->SetDepthStencilSurface(wideRt ? s_depthWide : s_depth);
     vp.X = 0; vp.Y = 0; vp.Width = rtW; vp.Height = rtH; vp.MinZ = 0.0f; vp.MaxZ = 1.0f;
     s_dev->SetViewport(&vp);
     s_dev->SetRenderState(D3DRS_HALFPIXELOFFSET, TRUE);
@@ -1743,35 +2052,80 @@ static void render_frame(void)
     s_dev->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
     s_dev->SetVertexDeclaration(s_decl);
     s_dev->SetVertexShader(s_vs);
-    s_transAutosort = g_xb_trans_sort && !(jreg(0x005F8098) & 1);
-    s_modVols = 0;
-    if (g_xb_mod_vols)
-        for (i = 0; i < s_scene.modVolCount && !s_modVols; i++)
-            s_modVols = s_scene.modVols[i].list == TA_LIST_OPAQUE_MOD && s_scene.modVols[i].count;
     fog_setup();
     s_dev->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, g_xb_fog ? s_scene.bgColorFog : s_scene.bgColor, depth_of(s_scene.bgDepth), 0);
-    if (s_modVols)
-    {
-        s_dev->SetRenderState(D3DRS_STENCILENABLE, TRUE);
-        s_dev->SetRenderState(D3DRS_STENCILWRITEMASK, 0xFF);
-        s_dev->SetRenderState(D3DRS_STENCILMASK, 0xFF);
-        s_dev->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_ALWAYS);
-        s_dev->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_REPLACE);
-        s_dev->SetRenderState(D3DRS_STENCILZFAIL, D3DSTENCILOP_KEEP);
-        s_dev->SetRenderState(D3DRS_STENCILFAIL, D3DSTENCILOP_KEEP);
-    }
+    passes = ta_scene_passes(&s_scene);
+    for (s_pass = 0; s_pass < passes; s_pass++)
     {
         u64 t1 = prof_ticks();
+        s_passSorted = s_pass < 32 ? (s_job.passSorted >> s_pass) & 1 : (s_job.passSorted >> 31) & 1;
+        s_transAutosort = g_xb_trans_sort && s_passSorted;
+        s_modVols = 0;
+        if (g_xb_mod_vols)
+            for (i = 0; i < s_scene.modVolCount && !s_modVols; i++)
+                s_modVols = s_scene.modVols[i].list == TA_LIST_OPAQUE_MOD && s_scene.modVols[i].pass == s_pass &&
+                            s_scene.modVols[i].count;
+        if (s_modVols)
+        {
+            s_dev->SetRenderState(D3DRS_STENCILENABLE, TRUE);
+            s_dev->SetRenderState(D3DRS_STENCILWRITEMASK, 0xFF);
+            s_dev->SetRenderState(D3DRS_STENCILMASK, 0xFF);
+            s_dev->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_ALWAYS);
+            s_dev->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_REPLACE);
+            s_dev->SetRenderState(D3DRS_STENCILZFAIL, D3DSTENCILOP_KEEP);
+            s_dev->SetRenderState(D3DRS_STENCILFAIL, D3DSTENCILOP_KEEP);
+        }
+        if (!list_index_build()) break;
         draw_list(TA_LIST_OPAQUE);
-    draw_list(TA_LIST_PUNCH);
-    if (s_modVols) draw_mod_volumes(w, h);
-    s_dev->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+        draw_list(TA_LIST_PUNCH);
+        if (s_modVols) draw_mod_volumes(w, h);
+        s_dev->SetRenderState(D3DRS_STENCILENABLE, FALSE);
         s_rOpaque += prof_ticks() - t1;
         t1 = prof_ticks();
         draw_list(TA_LIST_TRANS);
         s_rTrans += prof_ticks() - t1;
     }
 
+    if (reveal > 1.0f && !s_testMode && !rtt)
+    {
+        DWORD left = 0;
+        if (s_sideQueryBusy && s_sideQuery->GetData(&left, sizeof(left), 0) == S_OK)
+        {
+            s_sideQueryBusy = 0;
+            if (s_sidePixels && left * 100u > s_sidePixels * SIDE_EMPTY_PCT)
+            {
+                s_sideFullRun = 0;
+                if (++s_sideEmptyRun >= SIDE_CROP_AFTER && !s_sideCrop)
+                {
+                    s_sideCrop = 1;
+                    LOG_INFO("[xenos] 16:9: the sides left empty (%u%% untouched): the middle 4:3 shown", (u32)(left * 100u / s_sidePixels));
+                }
+            }
+            else
+            {
+                s_sideEmptyRun = 0;
+                if (++s_sideFullRun >= SIDE_FULL_AFTER && s_sideCrop)
+                {
+                    s_sideCrop = 0;
+                    LOG_INFO("[xenos] 16:9: the sides drawn again: shown");
+                }
+            }
+        }
+        if (s_sideQuery && !s_sideQueryBusy) side_query(w, h, rtW, rtH);
+        view43 = s_sideCrop;
+    }
+    else if (g_xb_widescreen == WIDE_ANAMORPHIC && !s_testMode && !rtt)
+        view43 = movie_frame((f32)w, (f32)h);
+    if (reveal > 1.0f && !s_testMode && !rtt && cx0 > 0)
+    {
+        D3DRECT side[2];
+        f32 l = ((f32)cx0 * s_xScale - s_xOff + 1.0f) * 0.5f * (f32)rtW, r = ((f32)w * s_xScale - s_xOff + 1.0f) * 0.5f * (f32)rtW;
+        side[0].x1 = 0; side[0].y1 = 0; side[0].x2 = (LONG)l; side[0].y2 = rtH;
+        side[1].x1 = (LONG)(r + 0.5f); side[1].y1 = 0; side[1].x2 = rtW; side[1].y2 = rtH;
+        s_dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+        s_scissor = ~0u;
+        s_dev->Clear(2, side, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0);
+    }
     if (rtt)
         rtt_finish(addr, rtW, rtH, stride);
     else if ((slot = frame_slot(addr, rtW, rtH, &fresh))->tex)
@@ -1791,6 +2145,8 @@ static void render_frame(void)
             D3DRECT r;
             f32 px0 = ((f32)rx0 * s_xScale - s_xOff + 1.0f) * 0.5f * (f32)rtW;
             f32 px1 = ((f32)rx1 * s_xScale - s_xOff + 1.0f) * 0.5f * (f32)rtW;
+            if (rx0 <= 0) px0 = 0.0f;
+            if (rx1 >= w) px1 = (f32)rtW;
             r.x1 = ((LONG)(px0 + 4.0f) & ~7);
             r.x2 = ((LONG)(px1 + 4.0f) & ~7);
             r.y1 = ((LONG)((f32)ry0 * (f32)rtH / (f32)h + 4.0f) & ~7);
@@ -1833,6 +2189,9 @@ static void render_frame(void)
         slot->taH = h;
         slot->xScale = s_xScale;
         slot->xOff = s_xOff;
+        slot->view43 = view43;
+        slot->viewU0 = reveal > 1.0f && view43 ? (1.0f - s_xOff) * 0.5f : 0.0f;
+        slot->viewU1 = reveal > 1.0f && view43 ? (1.0f + s_xOff) * 0.5f : 1.0f;
         slot->fence = g_xb_fb_readback ? s_dev->InsertFence() : 0;
     }
     gpu_dump(rtW, rtH);
@@ -2097,7 +2456,7 @@ static int fb_read_back(const FbPending *p, u32 y0, u32 y1, u64 t0)
     int n = p->hscale ? 2 : 1, cols, x;
     for (i = 0; i < FRAME_SLOTS; i++)
         if (s_frames[i].tex && s_frames[i].addr == p->addr && s_frames[i].vramBytes) slot = &s_frames[i];
-    if (!slot || vram_written_since(slot->vramOff, slot->vramBytes, slot->stamp)) return 0;
+    if (!slot) return 0;
     if (slot->fence) s_dev->BlockOnFence(slot->fence);
     else s_dev->BlockUntilIdle();
     s_fbWaitTicks += prof_ticks() - t0;
@@ -2182,9 +2541,46 @@ static void fb_readback_hook(u32 off32)
     if (changed) fb_range_update();
 }
 
+static void fb_read_rest(u32 addr)
+{
+    int i;
+    for (i = (int)s_fbPendN - 1; i >= 0; i--)
+    {
+        FbPending *p = &s_fbPend[i];
+        u32 band;
+        u64 t0;
+        if (p->addr != addr) continue;
+        t0 = prof_ticks();
+        xb_pvr_sync();
+        for (band = 0; band < p->bands && p->left;)
+        {
+            u32 end = band, y1;
+            if (p->done[band >> 5] & (1u << (band & 31)))
+            {
+                band++;
+                continue;
+            }
+            while (end < p->bands && !(p->done[end >> 5] & (1u << (end & 31))))
+            {
+                p->done[end >> 5] |= 1u << (end & 31);
+                end++;
+            }
+            y1 = end * p->bandLines;
+            if (y1 > p->lines) y1 = p->lines;
+            if (!fb_read_back(p, band * p->bandLines, y1, t0)) break;
+            p->left -= end - band;
+            band = end;
+        }
+        s_fbTicks += prof_ticks() - t0;
+        *p = s_fbPend[--s_fbPendN];
+        fb_range_update();
+        return;
+    }
+}
+
 static void render_submit(void)
 {
-    u32 words;
+    u32 words, i;
     const u32 *data;
     if (s_async) wait_job();
     data = pvr_ta_data(&words);
@@ -2193,6 +2589,9 @@ static void render_submit(void)
     pvr_regs_copy(s_job.regs);
     fb_note();
     ta_region_rect(s_job.regs, &s_job.region[0], &s_job.region[1], &s_job.region[2], &s_job.region[3]);
+    s_job.passSorted = 0;
+    for (i = 0; i < 32; i++)
+        if (ta_region_pass_sorted(s_job.regs, i)) s_job.passSorted |= 1u << i;
     if (s_dumpPath[0])
     {
         scene_dump(s_job.ta, words, s_job.regs);
@@ -2262,12 +2661,26 @@ IDirect3DTexture9 *xb_pvr_display(void)
     {
         FrameSlot *f = &s_frames[i];
         if (!f->tex || f->addr != addr || !f->vramBytes) continue;
-        if (vram_written_since(f->vramOff, f->vramBytes, f->stamp)) return NULL;
+        if (vram_written_since(f->vramOff, f->vramBytes, f->stamp))
+        {
+            fb_read_rest(addr);
+            return NULL;
+        }
         f->lastUse = s_renders;
         s_shown = f;
         return f->tex;
     }
     return NULL;
+}
+
+int xb_pvr_display_view(IDirect3DTexture9 *tex, f32 *u0, f32 *u1)
+{
+    *u0 = 0.0f;
+    *u1 = 1.0f;
+    if (!tex || !s_shown || s_shown->tex != tex || !s_shown->view43) return 0;
+    *u0 = s_shown->viewU0;
+    *u1 = s_shown->viewU1;
+    return 1;
 }
 
 int xb_pvr_display_size(IDirect3DTexture9 *tex, int *w, int *h, f32 *scale)
@@ -2291,6 +2704,7 @@ void xb_pvr_reset(void)
         memset(&s_frames[i], 0, sizeof(s_frames[i]));
     }
     s_fbPendN = 0;
+    s_sideCrop = s_sideEmptyRun = s_sideFullRun = 0;
     fb_range_update();
     retire_fence();
 }
@@ -2318,6 +2732,21 @@ int xb_pvr_init(IDirect3DDevice9 *dev)
     sp.HierarchicalZBase = 0;
     if (FAILED(dev->CreateDepthStencilSurface(RT_W, RT_H, D3DFMT_D24FS8, D3DMULTISAMPLE_NONE, 0, FALSE, &s_depth, &sp)))
         dev->CreateDepthStencilSurface(RT_W, RT_H, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &s_depth, &sp);
+    sp.Base = EDRAM_WIDE_RT;
+    sp.HierarchicalZBase = 0xFFFFFFFF;
+    dev->CreateRenderTarget(RT_WIDE_W, RT_H, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &s_rtWide, &sp);
+    sp.Base = EDRAM_WIDE_DEPTH;
+    sp.HierarchicalZBase = 0;
+    if (FAILED(dev->CreateDepthStencilSurface(RT_WIDE_W, RT_H, D3DFMT_D24FS8, D3DMULTISAMPLE_NONE, 0, FALSE, &s_depthWide, &sp)))
+        dev->CreateDepthStencilSurface(RT_WIDE_W, RT_H, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &s_depthWide, &sp);
+    if (!s_rtWide || !s_depthWide)
+    {
+        LOG_WARN("[xenos] no 1280x720 target: 16:9 frames drawn at most 1120 pixels wide");
+        if (s_rtWide) s_rtWide->Release();
+        if (s_depthWide) s_depthWide->Release();
+        s_rtWide = s_depthWide = NULL;
+    }
+    dev->CreateQuery(D3DQUERYTYPE_OCCLUSION, &s_sideQuery);
     dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &s_back);
     dev->CreateVertexDeclaration(decl, &s_decl);
     code = compile(s_vsSource, "vs_3_0", NULL);

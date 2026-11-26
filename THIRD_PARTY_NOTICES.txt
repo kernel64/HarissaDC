@@ -270,8 +270,10 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 Box art
 ================================================================
 Box art is downloaded at run time from libretro-thumbnails
-(https://thumbnails.libretro.com) and the game list from libretro-database
-(https://github.com/libretro/libretro-database); none of it is included here.
+(https://thumbnails.libretro.com and its GitHub copy,
+https://github.com/libretro-thumbnails, Dreamcast and Atomiswave) and the game
+list from libretro-database (https://github.com/libretro/libretro-database);
+none of it is included here.
 
 ================================================================
 rcheevos 12.5 (RetroAchievements runtime and client) - RetroAchievements
@@ -313,3 +315,16 @@ Commons Attribution-ShareAlike 4.0 International licence (CC BY-SA 4.0,
 https://creativecommons.org/licenses/by-sa/4.0/); this converted version is
 distributed under the same licence. The emulator reads it as data: its
 licence does not apply to the program.
+
+================================================================
+16:9 patches - Flycast's widescreen game cheats
+================================================================
+src/hw/widescreen_patches.inc and src/hw/widescreen_patches_arcade.inc hold
+the per-game 16:9 patches (RAM addresses and values that change a game's own
+projection) of Flycast's widescreen game cheat tables (core/cheats.cpp,
+https://github.com/flyinghead/flycast), converted to C tables. Codes by
+Esppiral, S4pph4rad, yzb37859365, Shenmue_Trilogy, Radaron, Virgin KLM, Joel,
+Zorlon, ELOTROLADO.NET, SEGARETRO.ORG and Sakuragi @ emutalk.net, gathered by
+flyinghead. Flycast is licensed under the GNU General Public License, version 2
+or (at your option) any later version; these tables are distributed in
+HarissaDC under version 2 of that licence (the LICENSE file).

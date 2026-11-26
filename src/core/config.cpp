@@ -38,6 +38,7 @@ void config_defaults(Config *c)
         }
     }
     c->zoom = 100;
+    c->sideFill = 1;
     c->artDownload = 1;
     c->rumble = 1;
     c->vsync = 1;
@@ -261,6 +262,7 @@ static int on_key(void *user, const char *section, const char *key, const char *
     else if (ini_key_is(key, "transsort")) c->transSort = ini_bool(value, c->transSort);
     else if (ini_key_is(key, "modvols")) c->modVols = ini_bool(value, c->modVols);
     else if (ini_key_is(key, "countdown")) c->countdown = ini_key_is(value, "on") || ini_key_is(value, "1") ? 1 : ini_key_is(value, "off") || ini_key_is(value, "0") ? 2 : 0;
+    else if (ini_key_is(key, "slowcpu")) c->slowCpu = ini_key_is(value, "on") || ini_key_is(value, "1") ? 1 : ini_key_is(value, "off") || ini_key_is(value, "0") ? 2 : 0;
     else if (ini_key_is(key, "palshader")) c->palShader = ini_key_is(value, "on") ? 1 : ini_key_is(value, "off") ? 2 : 0;
     else if (ini_key_is(key, "exactdepth")) c->exactDepth = ini_key_is(value, "on") || ini_key_is(value, "1") ? 1 : ini_key_is(value, "off") || ini_key_is(value, "0") ? 2 : 0;
     else if (ini_key_is(key, "hugedepth")) c->hugeDepth = ini_bool(value, c->hugeDepth);
@@ -290,15 +292,23 @@ static int on_key(void *user, const char *section, const char *key, const char *
     else if (ini_key_is(key, "updatecheck")) c->updateCheck = ini_int(value, c->updateCheck);
     else if (ini_key_is(key, "rumble")) c->rumble = ini_bool(value, c->rumble);
     else if (ini_key_is(key, "vmu")) c->vmuShared = ini_key_is(value, "shared");
+    else if (ini_key_is(key, "cdaudio")) c->cdRealtime = ini_key_is(value, "realtime") || ini_bool(value, 0);
     else if (ini_key_is(key, "lightgun")) c->lightGun = ini_bool(value, c->lightGun);
     else if (ini_key_is(key, "rotate")) c->rotate = ini_key_is(value, "auto") ? -1 : ini_int(value, c->rotate);
     else if (ini_key_is(key, "artdownload")) c->artDownload = ini_int(value, c->artDownload);
     else if (ini_key_is(key, "aspect")) c->aspect = ini_key_is(value, "stretch") ? 1 : 0;
-    else if (ini_key_is(key, "widescreen")) c->widescreen = ini_bool(value, c->widescreen);
+    else if (ini_key_is(key, "widescreen"))
+        c->widescreen = ini_key_is(value, "auto") || ini_key_is(value, "1") || ini_key_is(value, "on") ? CONFIG_WIDE_AUTO
+                        : ini_key_is(value, "reveal") || ini_key_is(value, "2")                         ? CONFIG_WIDE_REVEAL
+                        : ini_key_is(value, "anamorphic") || ini_key_is(value, "3")                     ? CONFIG_WIDE_ANAMORPHIC
+                                                                                                         : CONFIG_WIDE_OFF;
+    else if (ini_key_is(key, "sides")) c->sideFill = !ini_key_is(value, "black") && !ini_key_is(value, "0");
     else if (ini_key_is(key, "smooth")) c->smooth = ini_bool(value, c->smooth);
     else if (ini_key_is(key, "lastgame")) copy_path(c->lastGame, value);
     else if (ini_key_is(key, "autoboot")) c->autoBoot = ini_bool(value, c->autoBoot);
     else if (ini_key_is(key, "disc")) copy_path(c->disc, value);
+    else if (ini_key_is(key, "datadir")) copy_path(c->dataDir, value);
+    else if (ini_key_is(key, "exitto")) c->exitToDash = ini_key_is(value, "dashboard");
     else if (ini_key_is(key, "rendertest")) copy_path(c->renderTest, value);
     else if (ini_key_is(key, "cheats"))
     {
@@ -336,9 +346,10 @@ int config_parse_text(Config *c, const char *text)
 
 int config_write(const Config *c, int withLastGame, char *out, int size)
 {
-    int n = _snprintf(out, size, "cpu=%s\r\nrenderer=%s\r\nshowfps=%d\r\naspect=%s\r\nwidescreen=%d\r\nsmooth=%d\r\n",
+    static const char *const wides[4] = { "off", "auto", "reveal", "anamorphic" };
+    int n = _snprintf(out, size, "cpu=%s\r\nrenderer=%s\r\nshowfps=%d\r\naspect=%s\r\nwidescreen=%s\r\nsides=%s\r\nsmooth=%d\r\n",
                       c->useJit ? "jit" : "interp", c->gpuRender ? "gpu" : "soft", c->showFps, c->aspect ? "stretch" : "4:3",
-                      c->widescreen, c->smooth);
+                      wides[c->widescreen >= 0 && c->widescreen <= 3 ? c->widescreen : 0], c->sideFill ? "blur" : "black", c->smooth);
     if (n < 0 || n >= size) n = size - 1;
     {
         int r = _snprintf(out + n, size - n, "fxaa=%d\r\nsharpen=%d\r\nblur=%d\r\nscreen=%d\r\nbrightness=%d\r\nzoom=%d\r\nposx=%d\r\nposy=%d\r\n",
@@ -378,9 +389,11 @@ int config_write(const Config *c, int withLastGame, char *out, int size)
             r = _snprintf(out + n, size - n, "rumble=%d\r\nvsync=%d\r\ntexfilter=%d\r\nresolution=%s\r\nrotate=%s\r\n", c->rumble, c->vsync, c->texFilter,
                           c->renderScale == 1 ? "1x" : "1.5x", rot);
             if (r > 0 && n + r < size) n += r;
-            r = _snprintf(out + n, size - n, "bios=%s\r\naudioms=%d\r\nvmu=%s\r\n",
+            r = _snprintf(out + n, size - n, "bios=%s\r\naudioms=%d\r\ncdaudio=%s\r\nvmu=%s\r\n",
                           c->biosMode == BIOS_REAL ? "real" : c->biosMode == BIOS_AUTO ? "auto" : "hle", c->audioMs,
-                          c->vmuShared ? "shared" : "game");
+                          c->cdRealtime ? "realtime" : "game", c->vmuShared ? "shared" : "game");
+            if (r > 0 && n + r < size) n += r;
+            r = _snprintf(out + n, size - n, "slowcpu=%s\r\n", c->slowCpu == 1 ? "on" : c->slowCpu == 2 ? "off" : "auto");
             if (r > 0 && n + r < size) n += r;
         }
     }

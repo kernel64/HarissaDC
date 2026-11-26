@@ -18,6 +18,14 @@ static void field(char *out, const u8 *p, int n)
     while (n > 0 && out[n - 1] == ' ') out[--n] = 0;
 }
 
+int disc_info_title_odd(const u8 *p, int n)
+{
+    while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == 0)) n--;
+    while (n-- > 0)
+        if (p[n] < 32 || p[n] >= 127) return 1;
+    return 0;
+}
+
 int disc_info_read(Disc *d, DiscInfo *out)
 {
     u8 sector[2048];
@@ -46,6 +54,7 @@ int disc_info_read(Disc *d, DiscInfo *out)
     if (strlen(date) == 8)
         sprintf(out->date, "%.4s-%.2s-%.2s", date, date + 4, date + 6);
     field(out->title, sector + 0x80, 128);
+    out->titleOdd = disc_info_title_odd(sector + 0x80, 128);
     if (!out->title[0]) strcpy(out->title, out->product);
     return 0;
 }

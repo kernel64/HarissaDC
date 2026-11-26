@@ -44,6 +44,7 @@ struct TaModVol
     u32 list;
     u32 last;
     u32 first, count;
+    u32 pass;
 };
 
 struct TaScene
@@ -59,13 +60,22 @@ struct TaScene
     u32 bgColor, bgColorFog;
     f32 bgDepth;
     f32 zMax, zHuge;
+    u32 passes;
 };
 
 int ta_strip_can_cover(const TaScene *sc, const TaStrip *s);
 
 void ta_scene_orientation(const TaScene *s, f32 xScale, f32 *across, f32 *down, f32 *up);
 
+u32 ta_scene_widen_full_screen(TaScene *s, f32 w, f32 h, f32 left, f32 right);
+
 void ta_region_rect(const u32 *regs, int *x0, int *y0, int *x1, int *y1);
+
+u32 ta_region_pass_word(const u32 *regs, u32 pass);
+
+int ta_region_pass_sorted(const u32 *regs, u32 pass);
+
+u32 ta_scene_passes(const struct TaScene *s);
 
 void ta_scene_init(TaScene *s);
 void ta_scene_free(TaScene *s);

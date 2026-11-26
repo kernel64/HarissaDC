@@ -7,9 +7,13 @@
 #include <xtl.h>
 #include "../../core/types.h"
 
+enum { WIDE_OFF = 0, WIDE_REVEAL = 1, WIDE_ANAMORPHIC = 2 };
+extern int g_xb_widescreen;
+
 int xb_pvr_init(IDirect3DDevice9 *dev);
 void xb_pvr_reset(void);
 IDirect3DTexture9 *xb_pvr_display(void);
+int xb_pvr_display_view(IDirect3DTexture9 *tex, f32 *u0, f32 *u1);
 int xb_pvr_display_size(IDirect3DTexture9 *tex, int *w, int *h, f32 *scale);
 void xb_pvr_sync(void);
 int xb_pvr_busy(void);

@@ -5,6 +5,7 @@
 
 #include <string.h>
 
+#include "cdda.h"
 #include "holly.h"
 #include "../core/log.h"
 #include "../core/state.h"
@@ -34,6 +35,7 @@
 #define GD_BUSY    0
 #define GD_PAUSE   1
 #define GD_STANDBY 2
+#define GD_PLAY    3
 #define GD_OPEN    6
 #define GD_NODISC  7
 
@@ -126,16 +128,79 @@ static u8 disc_format(void)
     return s_disc->type == DISC_GDROM ? 8 : (u8)(s_disc->type >> 4);
 }
 
-static u8 secnum(void)
-{
-    return (u8)(s_discState | (disc_format() << 4));
-}
-
 static void put_fad(u8 *p, u32 fad)
 {
     p[0] = (u8)(fad >> 16);
     p[1] = (u8)(fad >> 8);
     p[2] = (u8)fad;
+}
+
+static u8 disc_state(void)
+{
+    return s_disc && cdda_playing() ? GD_PLAY : s_discState;
+}
+
+static u8 secnum(void)
+{
+    return (u8)(disc_state() | (disc_format() << 4));
+}
+
+static u32 get_fad(const u8 *p, int msf)
+{
+    if (msf) return ((u32)p[0] * 60 + p[1]) * 75 + p[2];
+    return ((u32)p[0] << 16) | ((u32)p[1] << 8) | p[2];
+}
+
+static u32 current_fad(void)
+{
+    u32 st = cdda_status();
+    return st == CDDA_PLAYING || st == CDDA_PAUSED ? cdda_fad() : s_lastFad;
+}
+
+static u8 bcd(u32 v)
+{
+    return (u8)(((v / 10) << 4) | (v % 10));
+}
+
+static u32 subcode(u32 format, u8 *out)
+{
+    u32 fad = current_fad(), rel, n = format == 0 ? 100 : 14, i;
+    DiscTrack *t = s_disc ? disc_track_at(s_disc, fad) : NULL;
+    u8 ctrlAdr = (u8)(((t ? t->ctrl : 4) << 4) | 1), track = (u8)(t ? t->number : 1);
+    memset(out, 0, 100);
+    rel = t && fad >= t->startFad ? fad - t->startFad : 0;
+    out[1] = (u8)cdda_status();
+    out[3] = (u8)n;
+    if (format == 0)
+    {
+        u8 q[12];
+        u16 crc = 0;
+        q[0] = ctrlAdr;
+        q[1] = bcd(track);
+        q[2] = bcd(1);
+        q[3] = bcd(rel / 75 / 60);
+        q[4] = bcd(rel / 75 % 60);
+        q[5] = bcd(rel % 75);
+        q[6] = 0;
+        q[7] = bcd(fad / 75 / 60);
+        q[8] = bcd(fad / 75 % 60);
+        q[9] = bcd(fad % 75);
+        for (i = 0; i < 80; i++)
+        {
+            u32 bit = (q[i >> 3] >> (7 - (i & 7))) & 1;
+            crc = (u16)(((crc >> 15) ^ bit) ? (crc << 1) ^ 0x1021 : crc << 1);
+        }
+        q[10] = (u8)(crc >> 8);
+        q[11] = (u8)crc;
+        for (i = 0; i < 96; i++) out[4 + i] = (u8)(((q[i >> 3] >> (7 - (i & 7))) & 1) << 6);
+        return n;
+    }
+    out[4] = ctrlAdr;
+    out[5] = track;
+    out[6] = 1;
+    put_fad(out + 7, rel);
+    put_fad(out + 11, fad);
+    return n;
 }
 
 static void toc_entry(u8 *p, u32 ctrl, u32 fad)
@@ -202,6 +267,7 @@ static void cmd_read(const u8 *p)
         fail(2, 0x3A);
         return;
     }
+    cdda_stop();
     s_readFad = start;
     s_readLeft = count;
     s_readFormat = dataSel == 0xF ? 2352 : 2048;
@@ -296,15 +362,16 @@ static void run_packet(void)
         return;
     case 0x10:
     {
-        DiscTrack *t = s_disc ? disc_track_at(s_disc, s_lastFad) : NULL;
+        u32 fad = current_fad();
+        DiscTrack *t = s_disc ? disc_track_at(s_disc, fad) : NULL;
         u32 off = p[2] < 10 ? p[2] : 10, len = p[4];
         memset(out, 0, 10);
-        out[0] = s_discState;
-        out[1] = (u8)(disc_format() << 4);
+        out[0] = disc_state();
+        out[1] = (u8)((disc_format() << 4) | (cdda_repeats() & 15));
         out[2] = (u8)(((t ? t->ctrl : 4) << 4) | 1);
         out[3] = (u8)(t ? t->number : 1);
         out[4] = 1;
-        put_fad(out + 5, s_lastFad);
+        put_fad(out + 5, fad);
         if (off + len > 10) len = 10 - off;
         data_out(out + off, len);
         return;
@@ -365,9 +432,34 @@ static void run_packet(void)
         data_out(out, len);
         return;
     }
-    case 0x16:
     case 0x20:
+    {
+        u32 type = p[1] & 7;
+        if (!s_disc) { fail(2, 0x3A); return; }
+        if (type == 1 || type == 2)
+        {
+            u32 start = get_fad(p + 2, type == 2), end = get_fad(p + 8, type == 2);
+            if (end == 0) end = s_disc->leadOutFad;
+            cdda_play(start, end > start ? end - 1 : start, p[6] & 15);
+        }
+        else if (type == 7)
+            cdda_resume();
+        s_discState = GD_PAUSE;
+        complete();
+        return;
+    }
     case 0x21:
+    {
+        u32 type = p[1] & 7;
+        if (!s_disc) { fail(2, 0x3A); return; }
+        if (type == 1 || type == 2) cdda_seek(get_fad(p + 2, type == 2));
+        else if (type == 3) cdda_stop();
+        else cdda_pause();
+        s_discState = type == 3 ? GD_STANDBY : GD_PAUSE;
+        complete();
+        return;
+    }
+    case 0x16:
     case 0x22:
         if (s_disc) s_discState = GD_PAUSE;
         complete();
@@ -378,11 +470,8 @@ static void run_packet(void)
         return;
     case 0x40:
     {
-        u32 len = ((u32)p[3] << 8) | p[4];
-        memset(out, 0, 100);
-        out[1] = 0x15;
-        out[3] = (p[1] & 15) == 0 ? 100 : 14;
-        data_out(out, len < out[3] ? len : out[3]);
+        u32 len = ((u32)p[3] << 8) | p[4], n = subcode(p[1] & 15, out);
+        data_out(out, len < n ? len : n);
         return;
     }
     case 0x70:

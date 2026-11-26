@@ -25,6 +25,9 @@ int xb_fs_parent(char *path);
 int xb_fs_exists(const char *path);
 
 void xb_fs_set_data_drive(const char *drive);
+#define XB_FS_DIR_MAX 128
+#define XB_FS_ROOT_MAX 32
+int xb_fs_set_data_root(const char *dir);
 const char *xb_fs_data_dir(char *out, int outSize, const char *dir);
 const char *xb_fs_data_path(char *out, int outSize, const char *dir, const char *name);
 

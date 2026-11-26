@@ -43,6 +43,17 @@ typedef double f64;
 #else
 #define EMU_CACHE_ALIGNED __attribute__((aligned(128)))
 #endif
+#if defined(_XBOX)
+#include <ppcintrinsics.h>
+#define EMU_PREFETCH(p) __dcbt(0, (const void *)(p))
+#define EMU_ZERO_LINE(p) __dcbz128(0, (void *)(p))
+#elif defined(__GNUC__)
+#define EMU_PREFETCH(p) __builtin_prefetch((const void *)(p))
+#define EMU_ZERO_LINE(p) ((void)(p))
+#else
+#define EMU_PREFETCH(p) ((void)(p))
+#define EMU_ZERO_LINE(p) ((void)(p))
+#endif
 
 #if !defined(_MSC_VER)
 #include <stdio.h>

@@ -28,6 +28,8 @@ void config_pad_defaults(u32 map[PADIN_COUNT], int *stick);
 
 enum { BIOS_HLE = 0, BIOS_REAL = 1, BIOS_AUTO = 2 };
 
+enum { CONFIG_WIDE_OFF = 0, CONFIG_WIDE_AUTO = 1, CONFIG_WIDE_REVEAL = 2, CONFIG_WIDE_ANAMORPHIC = 3 };
+
 struct Config
 {
     int logLevel;
@@ -52,6 +54,7 @@ struct Config
     int taSkip;
     int audioMs;
     int audioStretch;
+    int cdRealtime;
     int slice;
     int selfTest;
     int toneHz;
@@ -72,6 +75,7 @@ struct Config
     int transSort;
     int modVols;
     int countdown;
+    int slowCpu;
     int palShader;
     int exactDepth;
     int hugeDepth;
@@ -97,6 +101,7 @@ struct Config
     int artDownload;
     int aspect;
     int widescreen;
+    int sideFill;
     int smooth;
     int fxaa;
     int sharpen;
@@ -121,6 +126,8 @@ struct Config
     int achAt;
     int noNet;
     char disc[CONFIG_PATH_MAX];
+    char dataDir[CONFIG_PATH_MAX];
+    int exitToDash;
     char dumpBlocks[CONFIG_PATH_MAX];
     int dumpBlocksAt;
     int jitTrail;

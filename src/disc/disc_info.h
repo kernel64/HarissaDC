@@ -18,8 +18,10 @@ struct DiscInfo
     char maker[17];
     char device[17];
     u32 peripherals;
+    int titleOdd;
 };
 
+int disc_info_title_odd(const u8 *p, int n);
 int disc_info_read(Disc *d, DiscInfo *out);
 int disc_info_read_file(const char *path, DiscInfo *out);
 void disc_info_region(const DiscInfo *info, char *out, int size);

@@ -392,6 +392,9 @@ static void draw_triangle(const DrawState *st, const TaVertex *a, const TaVertex
     }
 }
 
+static u32 s_pass;
+static int s_passSorted;
+
 static void setup_state(DrawState *st, const TaStrip *s)
 {
     st->clip = s->clip;
@@ -399,7 +402,7 @@ static void setup_state(DrawState *st, const TaStrip *s)
     st->tsp = s->tsp;
     st->list = s->list;
     st->depthMode = (int)(s->isp >> 29);
-    if (s->list == TA_LIST_PUNCH || (s->list == TA_LIST_TRANS && !(pvr_reg(0x005F8098) & 1))) st->depthMode = 6;
+    if (s->list == TA_LIST_PUNCH || (s->list == TA_LIST_TRANS && s_passSorted)) st->depthMode = 6;
     st->zWrite = !((s->isp >> 26) & 1);
     st->gouraud = (s->pcw >> 1) & 1;
     st->shadow = (s->pcw >> 7) & 1;
@@ -417,7 +420,7 @@ static void setup_state(DrawState *st, const TaStrip *s)
     st->dstInstr = (s->tsp >> 26) & 7;
     st->ptRef = pvr_reg(0x005F811C) & 0xFF;
     st->tex = ((s->pcw >> 3) & 1) ? get_texture(s->tcw, s->tsp) : NULL;
-    if (st->list == TA_LIST_TRANS && !(pvr_reg(0x005F8098) & 1)) st->zWrite = s_depthPass && st->zWrite;
+    if (st->list == TA_LIST_TRANS && s_passSorted) st->zWrite = s_depthPass && st->zWrite;
 }
 
 struct TriKey
@@ -489,7 +492,7 @@ static void draw_list_sorted(u32 list, int w, int h)
         const TaStrip *s = &s_scene.strips[i];
         const TaVertex *v = &s_scene.verts[s->first];
         u32 k;
-        if (s->list != list || s->count < 3) continue;
+        if (s->list != list || s->pass != s_pass || s->count < 3) continue;
         for (k = 0; k + 2 < s->count; k++)
         {
             f32 z = v[k].z;
@@ -510,7 +513,7 @@ static void draw_list_sorted(u32 list, int w, int h)
     {
         const TaStrip *s = &s_scene.strips[i];
         u32 k;
-        if (s->list != list || s->count < 3 || !ta_strip_can_cover(&s_scene, s)) continue;
+        if (s->list != list || s->pass != s_pass || s->count < 3 || !ta_strip_can_cover(&s_scene, s)) continue;
         setup_state(&st, s);
         for (k = 0; k + 2 < s->count; k++) draw_strip_tri(&st, s, k, w, h);
     }
@@ -531,7 +534,7 @@ static void draw_list_sorted(u32 list, int w, int h)
 static void draw_list(u32 list, int w, int h)
 {
     u32 i, k;
-    if (list == TA_LIST_TRANS && !(pvr_reg(0x005F8098) & 1))
+    if (list == TA_LIST_TRANS && s_passSorted)
     {
         draw_list_sorted(list, w, h);
         return;
@@ -540,7 +543,7 @@ static void draw_list(u32 list, int w, int h)
     {
         const TaStrip *s = &s_scene.strips[i];
         DrawState st;
-        if (s->list != list || s->count < 3) continue;
+        if (s->list != list || s->pass != s_pass || s->count < 3) continue;
         setup_state(&st, s);
         for (k = 0; k + 2 < s->count; k++) draw_strip_tri(&st, s, k, w, h);
     }
@@ -550,15 +553,13 @@ enum { MV_XOR, MV_OR, MV_INCLUDE, MV_EXCLUDE };
 
 static void mod_triangle(const TaModTri *t, int op, int cull, int w, int h)
 {
-    f32 area = (t->x[1] - t->x[0]) * (t->y[2] - t->y[0]) - (t->x[2] - t->x[0]) * (t->y[1] - t->y[0]), inv;
     s32 minX, maxX, minY, maxY, x, y;
     DepthPlane plane;
     EdgeSet edges;
     f64 exactArea = ((f64)t->x[1] - t->x[0]) * ((f64)t->y[2] - t->y[0]) - ((f64)t->x[2] - t->x[0]) * ((f64)t->y[1] - t->y[0]);
-    if (area == 0 || exactArea == 0) return;
+    if (exactArea == 0) return;
     depth_plane(&plane, t->x[0], t->y[0], t->z[0], t->x[1], t->y[1], t->z[1], t->x[2], t->y[2], t->z[2]);
-    if ((cull == 2 && area < 0) || (cull == 3 && area > 0)) return;
-    (void)inv;
+    if ((cull == 2 && exactArea < 0) || (cull == 3 && exactArea > 0)) return;
     edges_setup(&edges, t->x[0], t->y[0], t->x[1], t->y[1], t->x[2], t->y[2], exactArea);
     minX = (s32)floorf(t->x[0] < t->x[1] ? (t->x[0] < t->x[2] ? t->x[0] : t->x[2]) : (t->x[1] < t->x[2] ? t->x[1] : t->x[2]));
     maxX = (s32)ceilf(t->x[0] > t->x[1] ? (t->x[0] > t->x[2] ? t->x[0] : t->x[2]) : (t->x[1] > t->x[2] ? t->x[1] : t->x[2]));
@@ -597,7 +598,7 @@ static void draw_mod_volumes(int w, int h)
     {
         const TaModVol *m = &s_scene.modVols[i];
         u32 mode = m->isp >> 29, cull = (m->isp >> 27) & 3;
-        if (m->list != TA_LIST_OPAQUE_MOD || !m->count) continue;
+        if (m->list != TA_LIST_OPAQUE_MOD || m->pass != s_pass || !m->count) continue;
         any = 1;
         if (base == ~0u) base = m->first;
         for (k = 0; k < m->count; k++)
@@ -756,7 +757,7 @@ static void dump_scene(const u32 *ta, u32 words)
 
 void soft_render_frame(void)
 {
-    u32 words, xclip = pvr_reg(0x005F8068), yclip = pvr_reg(0x005F806C), i;
+    u32 words, xclip = pvr_reg(0x005F8068), yclip = pvr_reg(0x005F806C), i, passes;
     const u32 *data = pvr_ta_data(&words);
     if (g_soft_dump_path) dump_scene(data, words);
     int w = (int)((xclip >> 16) & 0x7FF) + 1, h = (int)((yclip >> 16) & 0x3FF) + 1;
@@ -815,10 +816,15 @@ void soft_render_frame(void)
     }
     memset(s_stencil, 0, (size_t)(w * h));
     fog_setup();
-    draw_list(TA_LIST_OPAQUE, w, h);
-    draw_list(TA_LIST_PUNCH, w, h);
-    draw_mod_volumes(w, h);
-    draw_list(TA_LIST_TRANS, w, h);
+    passes = ta_scene_passes(&s_scene);
+    for (s_pass = 0; s_pass < passes; s_pass++)
+    {
+        s_passSorted = ta_region_pass_sorted(NULL, s_pass);
+        draw_list(TA_LIST_OPAQUE, w, h);
+        draw_list(TA_LIST_PUNCH, w, h);
+        draw_mod_volumes(w, h);
+        draw_list(TA_LIST_TRANS, w, h);
+    }
     s_lastW = w;
     s_lastH = h;
     write_framebuffer(w, h);

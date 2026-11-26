@@ -97,7 +97,7 @@ static u32 known_key(u32 asid, u32 va)
     return ((asid << 20) | (va >> 12)) + 1;
 }
 
-u32 *g_mmu_lut[2];
+u32 *g_mmu_lut[3];
 #define LUT_PAGES (1u << 20)
 #define LUT_TRACK 16384
 static u32 s_lutFilled[LUT_TRACK], s_lutCount;
@@ -106,7 +106,7 @@ static int s_lutOverflow;
 void sh4_mmu_lut_init(void)
 {
     int k;
-    for (k = 0; k < 2; k++)
+    for (k = 0; k < 3; k++)
     {
         if (!g_mmu_lut[k]) g_mmu_lut[k] = (u32 *)malloc(LUT_PAGES * sizeof(u32));
         if (g_mmu_lut[k]) memset(g_mmu_lut[k], 0xFF, LUT_PAGES * sizeof(u32));
@@ -118,13 +118,13 @@ void sh4_mmu_lut_init(void)
 static void lut_clear_all(void)
 {
     u32 i;
-    if (!g_mmu_lut[0] || !g_mmu_lut[1]) return;
+    if (!g_mmu_lut[0] || !g_mmu_lut[1] || !g_mmu_lut[2]) return;
     if (s_lutOverflow)
     {
         sh4_mmu_lut_init();
         return;
     }
-    for (i = 0; i < s_lutCount; i++) g_mmu_lut[0][s_lutFilled[i]] = g_mmu_lut[1][s_lutFilled[i]] = ~0u;
+    for (i = 0; i < s_lutCount; i++) g_mmu_lut[0][s_lutFilled[i]] = g_mmu_lut[1][s_lutFilled[i]] = g_mmu_lut[2][s_lutFilled[i]] = ~0u;
     g_mmu_stats[12] += s_lutCount;
     s_lutCount = 0;
 }
@@ -132,8 +132,8 @@ static void lut_clear_all(void)
 static void lut_clear_range(u32 va, u32 n)
 {
     u32 first = va >> 12, last = (va + n * 0x400u - 1) >> 12, i;
-    if (!g_mmu_lut[0] || !g_mmu_lut[1]) return;
-    for (i = first; i <= last && i < LUT_PAGES; i++) g_mmu_lut[0][i] = g_mmu_lut[1][i] = ~0u;
+    if (!g_mmu_lut[0] || !g_mmu_lut[1] || !g_mmu_lut[2]) return;
+    for (i = first; i <= last && i < LUT_PAGES; i++) g_mmu_lut[0][i] = g_mmu_lut[1][i] = g_mmu_lut[2][i] = ~0u;
 }
 
 static void tc_flush(void)
@@ -397,7 +397,7 @@ static void tc_fill(TcEntry *c, const TlbEntry *e, u32 va, int md, u32 tag)
 static void lut_fill(u32 va, const TcEntry *c)
 {
     u32 idx = va >> 12, pr = (c->ptel >> 5) & 3, delta, page, k, isNew;
-    if (!g_mmu_lut[0] || !g_mmu_lut[1] || (va >> 31) || !(c->flags & MMU_TC_RAM) || page_mask(c->ptel) < 0xFFFu || !(pr & 2)) return;
+    if (!g_mmu_lut[0] || !g_mmu_lut[1] || !g_mmu_lut[2] || (va >> 31) || !(c->flags & MMU_TC_RAM) || page_mask(c->ptel) < 0xFFFu || !(pr & 2)) return;
     page = (c->phys - (va & 0xC00u)) & 0x00FFF000u;
     delta = page - (va & 0xFFFFF000u);
     isNew = g_mmu_lut[0][idx] == ~0u && g_mmu_lut[1][idx] == ~0u;
@@ -406,6 +406,7 @@ static void lut_fill(u32 va, const TcEntry *c)
     {
         for (k = 0; k < 4 && !sh4_jit_ram_has_code(page + k * 0x400u); k++) {}
         if (k == 4) g_mmu_lut[1][idx] = delta;
+        g_mmu_lut[2][idx] = delta;
     }
     if (isNew)
     {

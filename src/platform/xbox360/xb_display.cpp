@@ -106,6 +106,17 @@ static const char s_psSrc[] =
     "  return float4(pow(saturate(c), prm2.yyy), 1.0);\n"
     "}\n";
 
+static const char s_fillSrc[] =
+    "sampler t0 : register(s0);\n"
+    "float4 prm : register(c0);\n"
+    "float3 tap(float2 uv) { return tex2Dlod(t0, float4(saturate(uv), 0.0, 0.0)).rgb; }\n"
+    "float4 main(float2 tc : TEXCOORD0) : COLOR {\n"
+    "  float2 d = prm.xy;\n"
+    "  float3 c = tap(tc) + tap(tc + float2(d.x, 0.0)) + tap(tc - float2(d.x, 0.0)) + tap(tc + float2(0.0, d.y)) + tap(tc - float2(0.0, d.y))\n"
+    "           + tap(tc + d) + tap(tc - d) + tap(tc + float2(d.x, -d.y)) + tap(tc + float2(-d.x, d.y));\n"
+    "  return float4(c * (prm.z / 9.0), 1.0);\n"
+    "}\n";
+
 struct DispVtx
 {
     float x, y, u, v;
@@ -123,6 +134,7 @@ static IDirect3DVertexDeclaration9 *s_decl;
 static IDirect3DPixelShader9 *s_ps[PS_KEYS];
 static unsigned char s_psFailed[PS_KEYS];
 static int s_ready;
+static IDirect3DPixelShader9 *s_fillPs;
 
 static LPD3DXBUFFER compile(const char *src, const char *profile, const D3DXMACRO *defines)
 {
@@ -176,6 +188,46 @@ void xb_display_rect(float *x, float *y, float *w, float *h)
     *h = s_rectH;
 }
 
+static int s_view43;
+static float s_viewU0, s_viewU1 = 1.0f;
+
+void xb_display_view(int as43, float u0, float u1)
+{
+    s_view43 = as43;
+    s_viewU0 = as43 ? u0 : 0.0f;
+    s_viewU1 = as43 ? u1 : 1.0f;
+}
+
+static void fill_sides(IDirect3DDevice9 *dev, float x0, float w)
+{
+    DispVtx q[4];
+    float c[4];
+    int side, i;
+    if (!s_fillPs) return;
+    dev->SetPixelShader(s_fillPs);
+    c[0] = 1.0f / 40.0f;
+    c[1] = 1.0f / 30.0f;
+    c[2] = 0.45f;
+    c[3] = 0.0f;
+    dev->SetPixelShaderConstantF(0, c, 1);
+    dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+    dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+    for (side = 0; side < 2; side++)
+    {
+        float a = side ? x0 + w : 0.0f, b = side ? (float)UI_WIDTH : x0;
+        if (b - a < 1.0f) continue;
+        for (i = 0; i < 4; i++)
+        {
+            float px = (i & 1) ? b : a, py = (i & 2) ? (float)UI_HEIGHT : 0.0f;
+            q[i].x = px * (2.0f / UI_WIDTH) - 1.0f;
+            q[i].y = 1.0f - py * (2.0f / UI_HEIGHT);
+            q[i].u = s_viewU0 + px / UI_WIDTH * (s_viewU1 - s_viewU0);
+            q[i].v = py / UI_HEIGHT;
+        }
+        dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(DispVtx));
+    }
+}
+
 void xb_display_draw(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex, int srcW, int srcLines, const Config *cfg)
 {
     static const float bright[3] = { 1.0f, 0.8f, 0.65f };
@@ -196,6 +248,12 @@ void xb_display_draw(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex, int srcW, in
         }
         dev->CreateVertexDeclaration(s_declElems, &s_decl);
         s_ready = s_vs && s_decl ? 1 : -1;
+        code = compile(s_fillSrc, "ps_3_0", NULL);
+        if (code)
+        {
+            dev->CreatePixelShader((const DWORD *)code->GetBufferPointer(), &s_fillPs);
+            code->Release();
+        }
     }
     screen = cfg->screen >= 0 && cfg->screen <= 5 ? cfg->screen : 0;
     crt = screen == 2 || screen == 3;
@@ -205,7 +263,7 @@ void xb_display_draw(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex, int srcW, in
     h = UI_HEIGHT * zoom;
     rot = cfg->rotate == 0 || cfg->rotate == 90 || cfg->rotate == 270 ? cfg->rotate : g_xb_auto_rotate;
     if (rot) w = h * 3.0f / 4.0f;
-    else w = cfg->aspect || td.Width * 9 >= td.Height * 15 ? UI_WIDTH * zoom : h * 4.0f / 3.0f;
+    else w = cfg->aspect || (!s_view43 && td.Width * 9 >= td.Height * 15) ? UI_WIDTH * zoom : h * 4.0f / 3.0f;
     x0 = (UI_WIDTH - w) * 0.5f + cfg->posX;
     y0 = (UI_HEIGHT - h) * 0.5f + cfg->posY;
     s_rectX = x0;
@@ -226,7 +284,7 @@ void xb_display_draw(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex, int srcW, in
         q[i].x = px * (2.0f / UI_WIDTH) - 1.0f;
         q[i].y = 1.0f - py * (2.0f / UI_HEIGHT);
         float sx = (i & 1) ? 1.0f : 0.0f, sy = (i & 2) ? 1.0f : 0.0f;
-        q[i].u = rot == 270 ? 1.0f - sy : rot == 90 ? sy : sx;
+        q[i].u = rot == 270 ? 1.0f - sy : rot == 90 ? sy : s_viewU0 + sx * (s_viewU1 - s_viewU0);
         q[i].v = rot == 270 ? sx : rot == 90 ? 1.0f - sx : sy;
     }
     vp.X = 0; vp.Y = 0; vp.Width = UI_WIDTH; vp.Height = UI_HEIGHT; vp.MinZ = 0.0f; vp.MaxZ = 1.0f;
@@ -254,6 +312,15 @@ void xb_display_draw(IDirect3DDevice9 *dev, IDirect3DTexture9 *tex, int srcW, in
     dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
     dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
     dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    if (cfg->widescreen && cfg->sideFill && !cfg->aspect && !rot && x0 > 1.0f)
+    {
+        fill_sides(dev, x0, w);
+        c[0] = 1.0f / td.Width; c[1] = 1.0f / td.Height; c[2] = (float)td.Width; c[3] = (float)td.Height;
+        dev->SetPixelShaderConstantF(0, c, 1);
+        dev->SetSamplerState(0, D3DSAMP_MINFILTER, cfg->smooth || crt ? D3DTEXF_LINEAR : D3DTEXF_POINT);
+        dev->SetSamplerState(0, D3DSAMP_MAGFILTER, cfg->smooth || crt ? D3DTEXF_LINEAR : D3DTEXF_POINT);
+    }
+    dev->SetPixelShader(ps);
     dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, q, sizeof(DispVtx));
     UiResume();
 }
